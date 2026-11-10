@@ -1,6 +1,6 @@
 ---
 name: autonomous-supervisor
-description: Use when handed a project idea, brief, or master prompt to deliver end-to-end with minimal human involvement - multi-step builds needing planning, specialist subagents, parallel work, progress memory that survives interruptions or context resets, bounded retries, or an honest verified-complete verdict. Also use when resuming a project that has a .supervisor/ directory. Not for single edits or quick questions.
+description: Use when the user hands over a project to deliver, build, or finish from a brief, spec, PRD, idea, or master prompt ("here's the brief", "build me...", "deliver this", "finish this project") - especially when the work spans several steps, sessions, or agents, must survive a handoff or interruption, or gets requirements added mid-conversation. Also use when continuing or resuming an interrupted project or a repo with a .supervisor/ directory, and when asked whether a project is really done or ready to ship. Not for single edits, typos, or quick questions.
 ---
 
 # Autonomous Supervisor

@@ -23,4 +23,4 @@ jobs:
         run: python -I tests/e2e/parallel/hidden_acceptance.py tests/e2e/parallel/reference
       - name: Eval scaffolds seed their workspaces
         run: |
-          for c in evals/*/scaffold.sh; do d=$(mktemp -d); (cd "$d" && bash "$GITHUB_WORKSPACE/$c") || exit 1; done
+          for c in $(find evals -name scaffold.sh); do d=$(mktemp -d); (cd "$d" && bash "$GITHUB_WORKSPACE/$c") || exit 1; done
