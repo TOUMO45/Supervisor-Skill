@@ -12,6 +12,8 @@ enforces **bounded retries and file ownership**, and only says *complete* when a
 [![ci](https://github.com/toumo45/supervisor-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/toumo45/supervisor-skill/actions/workflows/ci.yml)
 ![stdlib only](https://img.shields.io/badge/dependencies-stdlib%20only-2ea44f)
 ![skill](https://img.shields.io/badge/agent%20skill-SKILL.md-7b61ff)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![plugin](https://img.shields.io/badge/claude%20plugin-validated-22d3ee)
 
 <img src="assets/supervisor-infographic.webp" alt="Autonomous Supervisor: your idea flows to a supervisor that plans, delegates, monitors and resolves; specialists for research, architecture, design, development, testing and review; shared project memory of goals, decisions, progress and evidence; a feedback loop; and the workflow Understand, Plan, Execute, Verify, Fix, Deliver with repair-and-recheck." width="100%">
 
@@ -34,6 +36,9 @@ What they *don't* have is **state that outlives the conversation** and **rules t
 | Fix #4 is a variation of fixes #1–3 | `task attempt` trips a **RETRY LIMIT** (exit 3) and forces a recorded strategy change |
 | Two agents edit the same file | `task set … running` refuses overlapping file ownership, unmet deps, or exceeding the parallel limit |
 | `verified` with no proof | `verify` / `verified` refuse to record without `--evidence` (exit 2) |
+| "Verified" work edited later still counts as done | owned files are fingerprinted at verification; `resume` / `gate` flag drift for re-verification |
+| Endless approach-switching | **STRATEGY LIMIT** after 3 approaches per task forces escalation |
+| Work deferred to "later" is forgotten | `gate` refuses while next actions remain; criteria must span the whole scope |
 | Ceremony on trivial tasks | Explicit **Direct / Lite / Full** mode selection up front |
 
 ## Install
@@ -97,10 +102,12 @@ skills/autonomous-supervisor/
 │                               # escalation, final-delivery, memory (manual fallback)
 └── references/                 # delegation rules, recovery procedures, host adaptation
 tests/
-├── test_supervisor_cli.py      # 29 behavioural tests of the CLI
+├── test_supervisor_cli.py      # 38 behavioural tests of the CLI (incl. concurrency)
 ├── validate_skill.py           # structural lint (frontmatter, links, word budget)
 ├── scenarios/                  # 8 pressure scenarios + recorded results
-└── e2e/                        # benchmark brief, seeded starter, hidden acceptance oracle
+└── e2e/                        # benchmark briefs, seeded starter, hidden acceptance oracles,
+                                #   reference implementations (csvmd, parallel/textkit)
+evals/                          # `claude plugin eval` suite: with-plugin vs no-plugin arms
 .claude-plugin/                 # plugin + marketplace manifests
 ```
 
@@ -115,6 +122,7 @@ shown to the agents. Details and transcripts summary: [`tests/scenarios/results.
 | 8 single-turn pressure scenarios | 8/8 correct | No regressions (Direct mode on trivial tasks, honest fallbacks) |
 | E2E build, one session | 18/18 · 94k tokens · 5 calls | 18/18 · 100k tokens · 8 calls · chose **Lite** mode |
 | Interruption, fully specified brief | 18/18 · no durable handoff | 18/18 · full `.supervisor/` memory |
+| Full mode: 3 parallel workers vs one agent (`textkit`) | 21/21 · 14 tests · 92k tokens · 28s | 21/21 · **35 tests** · ~3x tokens · 71s · zero file conflicts |
 | **Interruption + user clarifications given mid-session** | **18/20**: session 2 *deleted* a user-requested feature as "scope creep" and dropped the exit-code override | **20/20**: both honoured via a binding decision, deviation from the brief disclosed |
 
 **Honest reading:** on small, fully specified, single-session work a strong model doesn't need
@@ -122,7 +130,12 @@ this skill, and the skill costs about 6% more tokens. It pays off where real pro
 Requirements that live in conversation, work that crosses sessions or context resets, and
 "done" claims that need to be audited. The benchmark also **caught a bug in the skill itself**:
 the gate passed on criteria that covered only one session's slice. The bug is fixed and covered
-by regression tests.
+by regression tests. Dogfooding Full mode caught a second one: the parallel limit counted
+the supervisor's own integration task. Fixed and regression-tested. The parallel run also showed
+that fanning out to subagents for small tracks costs about 3x the tokens without improving the
+score, so the skill now fans out only for substantial tracks.
+
+EVAL_PLACEHOLDER
 
 ## Development
 
@@ -130,6 +143,9 @@ by regression tests.
 python3 tests/validate_skill.py                    # skill structure lint
 python3 -m unittest discover -s tests -v           # CLI behaviour tests
 python3 -I tests/e2e/hidden_acceptance.py tests/e2e/reference   # oracle self-check: 18/18
+python3 -I tests/e2e/parallel/hidden_acceptance.py tests/e2e/parallel/reference   # 21/21
+claude plugin validate .                           # manifests, skill, icon
+claude plugin eval . --scaffold --trust-plugin --allow-tools Bash Write Edit -j 4   # with vs without plugin
 ```
 
 The skill was built test-first following the *writing-skills* method: pressure scenarios were run
@@ -145,6 +161,10 @@ Evaluated as inspiration, not copied: [obra/superpowers](https://github.com/obra
 [troykelly/claude-skills](https://github.com/troykelly/claude-skills) (issue-driven autonomy),
 [OpenHands/software-agent-sdk](https://github.com/OpenHands/software-agent-sdk) (agent runtime),
 [crewAIInc/crewAI](https://github.com/crewAIInc/crewAI) (role-based teams).
+
+## License
+
+[MIT](LICENSE) © 2026 Kamari Fatima Zuhra
 
 ## Guiding principle
 

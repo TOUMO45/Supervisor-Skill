@@ -98,3 +98,45 @@ Cost: 102.5k tokens / 9 calls (vs 100.6k / 8 before the fix).
   source of extra tool calls.
 - **Criterion-specific evidence recipe** - session 1 of test 3 recorded the same "29 tests OK"
   string as evidence for five different criteria.
+
+## 6. Full mode with real parallel subagents (`tests/e2e/parallel/`)
+
+Brief: `textkit`, three independent modules (slug, toc, stats) plus an integrating CLI. Hidden oracle:
+21 checks (reference 21/21, empty dir 0/21). The supervisor ran in the top-level session (spawned
+subagents have no spawn tool, verified by listing a subagent's tools), following SKILL.md exactly:
+`init` → 7 criteria → interface contract `D1` → 4 tasks with disjoint file ownership → 3 workers
+dispatched in one message with full task-assignment briefs → supervisor built the CLI/README (T4)
+in parallel → independent verification → evidence per criterion → `next --clear` → `gate`.
+
+| Arm | Hidden score | Project tests | Tokens | Wall time | Verdict |
+|---|---|---|---|---|---|
+| Single agent, no skill | 21/21 | 14 | 92k | 28s | prose |
+| Supervisor + 3 parallel workers | 21/21 | **35** | ~270k workers + supervision | 71s | `gate`: VERIFIED COMPLETE, 7 criteria with evidence, effort: 4 dispatches / 0 failed attempts |
+
+All three workers reported in the required format with real command output; no ownership conflicts.
+
+**Findings:**
+1. Full mode works end-to-end, but on tracks of 2-3 tool calls each, fan-out costs ~3x tokens and
+   more wall time for equal correctness (more tests is the only quality gain). SKILL.md now says to
+   fan out only for substantial tracks (>~10 tool calls), with the measurement in `references/delegation.md`.
+2. **Bug:** the parallel limit counted the supervisor's own integration task, blocking the very
+   "do non-overlapping work while agents run" pattern the skill prescribes. Fixed: owners `self`,
+   `supervisor` and `lead` don't consume an agent slot (still checked for file overlap). Regression
+   tests in `TestSelfOwnedWork`.
+
+## 7. v1.1 hardening from a weak-spot audit (all TDD, `tests/test_supervisor_cli.py`)
+
+| Weakness | Upgrade |
+|---|---|
+| "Verified" work silently goes stale when edited later | `verified` fingerprints owned files; `resume`/`gate` flag drift |
+| "3 strategies then escalate" was doc-only | `STRATEGY LIMIT` enforced (exit 3) |
+| No way to record descoped work | `criterion drop --reason`; gate lists exclusions |
+| `resume` couldn't tell stuck agents from fresh ones | running-since timestamps |
+| Concurrent subagents writing state untested | 20-writer stress test, no lost updates |
+| No efficiency signal | effort metrics in `status`, `resume`, `gate` |
+
+## 8. Packaging
+
+`claude plugin validate .` passes with **no warnings**; the plugin installs from the marketplace
+(`claude plugin install autonomous-supervisor@supervisor-skill`, status enabled). Measured cost:
+**~155 tokens always-on** (description only), **~3.2k tokens** when the skill fires.

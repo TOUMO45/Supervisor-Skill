@@ -19,3 +19,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Benchmark oracle self-check (reference implementation must score 18/18)
         run: python -I tests/e2e/hidden_acceptance.py tests/e2e/reference
+      - name: Parallel benchmark oracle self-check (reference must score 21/21)
+        run: python -I tests/e2e/parallel/hidden_acceptance.py tests/e2e/parallel/reference
+      - name: Eval scaffolds seed their workspaces
+        run: |
+          for c in evals/*/scaffold.sh; do d=$(mktemp -d); (cd "$d" && bash "$GITHUB_WORKSPACE/$c") || exit 1; done
