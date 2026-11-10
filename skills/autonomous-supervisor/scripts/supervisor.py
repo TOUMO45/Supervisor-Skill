@@ -154,7 +154,8 @@ def render(state):
         "",
         "> **Resuming this project?** Load the `autonomous-supervisor` skill, then run "
         f"`python3 {state.get('cli') or 'supervisor.py'} resume` before doing anything else. "
-        "Verified work and recorded decisions below are binding.",
+        "Verified work and recorded decisions below are binding. If the CLI cannot write (exit 4), record "
+        "progress in `.supervisor/MANUAL.md` instead - the CLI never overwrites it and `resume` shows it.",
         "",
         f"**Objective:** {state['objective']}",
         "",
@@ -508,6 +509,10 @@ def cmd_resume(args, directory):
         "## Next actions",
         *([f"{i}. {a}" for i, a in enumerate(state["next"], 1)] or ["- none recorded: derive from sections above"]),
     ]
+    manual = directory / "MANUAL.md"
+    if manual.exists() and manual.read_text(encoding="utf-8").strip():
+        out += ["", "## Manual notes (written by hand when the CLI could not write - reconcile into the CLI now)",
+                manual.read_text(encoding="utf-8").strip()]
     print("\n".join(out))
 
 
@@ -631,9 +636,10 @@ def main(argv=None):
     except OSError as exc:
         print(
             f"error: cannot write project memory in {state_dir()}/ ({exc.strerror or exc}). The shell is probably "
-            "sandboxed or the filesystem is read-only. Fallback: keep .supervisor/MEMORY.md by hand with your "
-            "file-writing tool, using templates/memory.md from the autonomous-supervisor skill, apply the guards "
-            "yourself, and tell the user the gate is manual this session. Do not hand-edit state.json.",
+            "sandboxed or the filesystem is read-only. Fallback: record progress (task status, evidence, decisions, "
+            "next actions) in .supervisor/MANUAL.md with your file-writing tool, following templates/memory.md "
+            "from the autonomous-supervisor skill; `resume` shows it and the CLI never overwrites it. Apply the "
+            "guards yourself and tell the user the gate is manual this session. Do not hand-edit state.json.",
             file=sys.stderr,
         )
         return EXIT_UNWRITABLE

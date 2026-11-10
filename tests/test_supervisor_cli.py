@@ -417,3 +417,23 @@ class TestUnwritableMemory(CliTestCase):
         self.assertNotIn("Traceback", proc.stderr)
         self.assertIn("cannot write", proc.stderr)
         self.assertIn("templates/memory.md", proc.stderr)
+
+    def test_manual_notes_survive_rerender_and_are_shown_on_resume(self):
+        self.init()
+        notes = self.dir / ".supervisor" / "MANUAL.md"
+        notes.write_text("T2 verified by hand: test_cli 8 OK (CLI was read-only)\n")
+        self.run_cli("log", "milestone")  # re-render must not touch MANUAL.md
+        self.assertIn("T2 verified by hand", notes.read_text())
+        out = self.run_cli("resume").stdout
+        self.assertIn("Manual notes", out)
+        self.assertIn("T2 verified by hand", out)
+        self.assertIn("MANUAL.md", (self.dir / ".supervisor" / "MEMORY.md").read_text())
+
+    def test_unwritable_error_points_to_manual_notes_file(self):
+        blocker = self.dir / "not-a-dir"
+        blocker.write_text("x")
+        proc = subprocess.run(
+            [sys.executable, str(CLI), "init", "--objective", "x"], cwd=self.dir,
+            capture_output=True, text=True, env={**os.environ, "SUPERVISOR_DIR": str(blocker / "sub")},
+        )
+        self.assertIn("MANUAL.md", proc.stderr)

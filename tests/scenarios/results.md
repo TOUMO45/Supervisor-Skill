@@ -140,3 +140,35 @@ All three workers reported in the required format with real command output; no o
 `claude plugin validate .` passes with **no warnings**; the plugin installs from the marketplace
 (`claude plugin install autonomous-supervisor@supervisor-skill`, status enabled). Measured cost:
 **~155 tokens always-on** (description only), **~3.2k tokens** when the skill fires.
+
+## 9. `claude plugin eval` suite (`evals/`, Sonnet 5.5, with-plugin vs no-plugin arms)
+
+**Discovery was the biggest weakness, and only this harness could reveal it.** Every earlier
+benchmark *told* the agent to read SKILL.md. Run as an installed plugin, the skill **never fired on
+its own (0/6)**: it was loaded and listed, but the model chose not to invoke it.
+
+Trigger micro-eval (7 prompts: 5 should fire, 2 should not; 4-6 turns each; ~$0.6 per variant):
+
+| Description | Score | brief+handoff | done-check | resume | typo / question (must not fire) |
+|---|---|---|---|---|---|
+| v0 (original) | 0.57 | 0/2 | 0/2 | 0/2 | 2/2, 2/2 |
+| v1 (user phrases) | 0.86 | 2/4 | 2/2 | 2/2 | 2/2, 2/2 |
+| **v2 (shipped)** | **1.00** | **6/6** | 2/2 | 2/2 | 2/2, 2/2 |
+
+The trigger cases are kept in `evals/triggers/` as a regression suite for future description edits.
+
+**Full suite after the fix** (11 cases × 2 runs × 2 arms, $4.60): 10/11 cases pass. Trigger cases Δ +1.00;
+`gate-honesty` Δ +0.25 (baseline once gave a verdict without grounded reasons); the remaining outcome
+cases tie at 1.00. Sonnet 5.5 handles single-session versions of these scenarios well on its own.
+
+**Resume triggering** was 1/4. Fix: `MEMORY.md` now describes itself (load the skill, the exact
+`resume` command), and `state.json` records the CLI path. Afterwards: trigger-resume 3/3, resume-no-redo
+3/3, then 2/3 in a later batch (8/9 overall). Even in the miss, the agent followed the header.
+
+**Environment caveat and robustness fix.** In this container the eval sandbox mounts the workspace
+read-only to shell commands (`touch plain.txt` fails; Write/Edit tools work), in both arms. So
+the CLI couldn't persist state in eval runs, and outcome comparisons here understate the skill. That
+exposed a real gap: the CLI died with a raw `OSError` and the skill had no rule for it. Now the CLI
+exits `4` with an actionable message, the skill's host-adaptation table says to record progress in
+`.supervisor/MANUAL.md` (never overwritten by the CLI, shown by `resume`), and re-tests went from
+0/2 to **3/3** runs recording progress, all honestly reporting "gate is manual this session".

@@ -102,12 +102,13 @@ skills/autonomous-supervisor/
 │                               # escalation, final-delivery, memory (manual fallback)
 └── references/                 # delegation rules, recovery procedures, host adaptation
 tests/
-├── test_supervisor_cli.py      # 38 behavioural tests of the CLI (incl. concurrency)
+├── test_supervisor_cli.py      # 45 behavioural tests of the CLI (incl. concurrency)
 ├── validate_skill.py           # structural lint (frontmatter, links, word budget)
 ├── scenarios/                  # 8 pressure scenarios + recorded results
 └── e2e/                        # benchmark briefs, seeded starter, hidden acceptance oracles,
                                 #   reference implementations (csvmd, parallel/textkit)
-evals/                          # `claude plugin eval` suite: with-plugin vs no-plugin arms
+evals/                          # `claude plugin eval` suite: 4 outcome + 7 trigger cases,
+                                #   with-plugin vs no-plugin arms
 .claude-plugin/                 # plugin + marketplace manifests
 ```
 
@@ -135,7 +136,24 @@ the supervisor's own integration task. Fixed and regression-tested. The parallel
 that fanning out to subagents for small tracks costs about 3x the tokens without improving the
 score, so the skill now fans out only for substantial tracks.
 
-EVAL_PLACEHOLDER
+### `claude plugin eval`: with vs. without the plugin
+
+[`evals/`](evals/) holds 11 cases. Each runs in a with-plugin arm and a no-plugin baseline arm on
+Sonnet 5.5, and anyone can reproduce them with one command.
+
+| Finding | Before | After |
+|---|---|---|
+| **Discovery:** did the skill fire on its own? | **0/6.** Earlier benchmarks *told* agents to read SKILL.md, so discovery was never tested | Description rewritten using a trigger micro-eval: **0.57 → 1.00** (fires on 8/8 project prompts, stays quiet on typo and question prompts) |
+| Brief + handoff prompt | 0/4 | **6/6** |
+| "Continue the interrupted project" | 1/4 | **8/9.** `MEMORY.md` now describes itself (names the skill and the exact `resume` command) |
+| Sandboxed or read-only shell | Raw `OSError`; progress unrecorded (0/2) | CLI exits `4` with a fallback; progress kept in `MANUAL.md` (**3/3**) |
+| `gate-honesty` ("workers say done") | baseline 0.75 | **1.00** with the skill (Δ +0.25) |
+
+The single-session outcome cases otherwise tie at 1.00 in both arms. Sonnet 5.5 handles them
+alone, so they serve as regression guards. Note: in this repo's cloud container, the eval
+sandbox mounted the workspace read-only for shell commands, which disabled the CLI in eval runs.
+The outcome evidence that shows the skill's value is therefore the subagent benchmarks above,
+where the shell could write.
 
 ## Development
 
