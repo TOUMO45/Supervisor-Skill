@@ -1,0 +1,11 @@
+{
+  "name": "supervisor-skill",
+  "owner": { "name": "toumo45" },
+  "plugins": [
+    {
+      "name": "autonomous-supervisor",
+      "source": "./",
+      "description": "Autonomous project supervisor skill: plan, delegate, remember, verify, deliver."
+    }
+  ]
+}

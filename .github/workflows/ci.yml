@@ -1,0 +1,21 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Lint skill structure
+        run: python tests/validate_skill.py
+      - name: CLI behaviour tests
+        run: python -m unittest discover -s tests -v
+      - name: Benchmark oracle self-check (reference implementation must score 18/18)
+        run: python -I tests/e2e/hidden_acceptance.py tests/e2e/reference
