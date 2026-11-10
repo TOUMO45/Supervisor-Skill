@@ -131,7 +131,7 @@ Report the gate's verdict verbatim using `templates/final-delivery.md`. **Never 
 | Missing | Fallback, stated plainly |
 |---|---|
 | Subagents (including when *you* are a subagent) | Run the tracks sequentially and label them that way. Never claim parallelism. |
-| Script execution | Keep `MEMORY.md` by hand using `templates/memory.md` and apply the guards yourself. |
+| Script execution, or the CLI exits `4` (sandboxed / read-only shell) | Keep `.supervisor/MEMORY.md` by hand with your file-writing tool, using `templates/memory.md`. Apply the guards yourself and say the gate is manual. |
 | Persistence | Print the memory at milestones for the user to save and paste back. |
 
 Details: `references/host-adaptation.md`.

@@ -387,3 +387,33 @@ class TestSelfOwnedWork(CliTestCase):
         self.run_cli("task", "add", "Core again", "--files", "src/core.py")
         self.run_cli("task", "set", "T5", "running", "--owner", "worker-a")
         self.run_cli("task", "set", "T6", "running", "--owner", "self", expect=3)
+
+
+class TestSelfDescribingMemory(CliTestCase):
+    """Evals showed fresh agents found .supervisor/ but didn't know a skill/CLI goes with it."""
+
+    def test_memory_md_tells_a_fresh_agent_how_to_resume(self):
+        self.init()
+        memory = (self.dir / ".supervisor" / "MEMORY.md").read_text()
+        self.assertIn("autonomous-supervisor", memory)
+        self.assertIn(f"{CLI.resolve()} resume", memory)
+
+    def test_state_json_records_cli_path(self):
+        self.init()
+        self.assertEqual(self.state()["cli"], str(CLI.resolve()))
+
+
+class TestUnwritableMemory(CliTestCase):
+    """Eval sandbox made the workspace read-only to the shell: the CLI died with a raw OSError."""
+
+    def test_unwritable_state_dir_gives_actionable_error_not_traceback(self):
+        blocker = self.dir / "not-a-dir"
+        blocker.write_text("x")
+        proc = subprocess.run(
+            [sys.executable, str(CLI), "init", "--objective", "x"], cwd=self.dir,
+            capture_output=True, text=True, env={**os.environ, "SUPERVISOR_DIR": str(blocker / "sub")},
+        )
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIn("cannot write", proc.stderr)
+        self.assertIn("templates/memory.md", proc.stderr)
