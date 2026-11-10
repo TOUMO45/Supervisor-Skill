@@ -80,7 +80,16 @@ Fix (`supervisor.py` + SKILL.md, regression tests `test_gate_not_complete_while_
 Replayed on the real session-2 state: before the fix `gate` → exit 0; after → exit 10 listing the
 stale actions; after `next --clear` → exit 0.
 
-RETEST_PLACEHOLDER
+### Re-test after the fix (fresh agent, same clarified session-1 scenario)
+
+| Check | Before fix | After fix |
+|---|---|---|
+| Criteria span whole scope (incl. deferred CLI/README) | 6 core-only criteria | **10 criteria (AC1-AC10)**, 7 pending |
+| User clarifications become criteria + decisions | decisions only | **AC6, AC7 + D2, D3, recorded before coding** |
+| Evidence specific per criterion | suite total reused | **named tests per criterion** |
+| Gate verdict at end of partial session | VERIFIED COMPLETE (wrong) | **PARTIALLY COMPLETE (exit 10)**, lists AC4-AC10, T2-T4 and open next actions |
+
+Cost: 102.5k tokens / 9 calls (vs 100.6k / 8 before the fix).
 
 ## 5. Refactor changes driven by these runs
 
