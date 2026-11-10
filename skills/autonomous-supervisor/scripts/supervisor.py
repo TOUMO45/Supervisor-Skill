@@ -353,6 +353,8 @@ def cmd_simple_add(bucket, prefix):
 def cmd_next(args, directory):
     with locked(directory):
         state = load(directory)
+        if args.clear == bool(args.actions):
+            raise CliError("give one or more actions, or --clear (not both)")
         state["next"] = [one_line(a) for a in args.actions]
         save(directory, state)
     print(f"{len(state['next'])} next action(s) set")
@@ -435,6 +437,9 @@ def cmd_gate(args, directory):
         problems.append("no acceptance criteria defined - completion cannot be judged")
     problems += [f"{c} not verified ({criteria[c]['status']}): {criteria[c]['text']}" for c in unverified_criteria]
     problems += [f"{t} is `{tasks[t]['status']}`, not verified: {tasks[t]['title']}" for t in open_tasks]
+    # Recorded next actions mean work is still planned. Either it is out-of-scope
+    # follow-up (then `next --clear`) or the criteria don't cover the full scope.
+    problems += [f"next action still recorded: {a} (do it, add it as a task, or `next --clear`)" for a in state["next"]]
     if blocked:
         print("BLOCKED")
         for t, x in blocked:
@@ -447,7 +452,8 @@ def cmd_gate(args, directory):
         for p in problems:
             print(f"- {p}")
         raise SystemExit(EXIT_PARTIAL)
-    print("VERIFIED COMPLETE")
+    print(f"VERIFIED COMPLETE ({len(criteria)} criteria - this verdict covers exactly these; "
+          "confirm they span the whole agreed scope)")
     for c, x in criteria.items():
         print(f"- {c} {x['text']}: {x['evidence']}")
 
@@ -503,8 +509,9 @@ def build_parser():
     s = sub.add_parser("risk", help="record a risk")
     s.add_argument("text")
     s.set_defaults(fn=cmd_simple_add("risks", "R"))
-    s = sub.add_parser("next", help="replace the next-actions list")
-    s.add_argument("actions", nargs="+")
+    s = sub.add_parser("next", help="replace the next-actions list (or --clear it when finished)")
+    s.add_argument("actions", nargs="*")
+    s.add_argument("--clear", action="store_true", help="empty the list - required before the gate can pass")
     s.set_defaults(fn=cmd_next)
     s = sub.add_parser("log", help="append a milestone note")
     s.add_argument("text")

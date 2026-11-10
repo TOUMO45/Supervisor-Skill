@@ -52,7 +52,35 @@ Session 1 receives two requirements from the user *in conversation* that only se
 (the CLI) can implement; session 2 sees only the original brief and the repository.
 Scored with `hidden_acceptance.py --clarified` (20 checks).
 
-CLARIFIED_PLACEHOLDER
+| Arm | Where the clarifications survived after session 1 | Session 2 behaviour | Hidden score |
+|---|---|---|---|
+| Baseline | Env var: implemented in `core.py`. **Exit-3 override: chat reply only.** | Treated `CSVMD_MAX_WIDTH` as unrequested scope creep and **deleted it**; kept exit 2; reported success | **18/20** |
+| With skill | `D1` binding decision "user clarification", criteria, `EXIT_MISSING_FILE` constant, next actions | Ran `resume`, honoured D1, implemented both, and flagged to the user that the build deviates from `brief.md` because of a recorded clarification | **20/20** |
+
+Cost: session 2 baseline 95.1k tokens / 3 calls; with skill 100.9k / 6 calls.
+
+**Finding:** this is the failure the skill exists for. A capable agent with no durable memory not
+only lost a user requirement, it actively removed a correct implementation of it, because the
+written brief was the only surviving source of truth. +6% tokens bought 2 extra correct
+requirements and an honest, auditable report.
+
+### Bug found by this test (and fixed)
+
+Session 1 *with* the skill defined criteria for its own slice only, so `gate` printed
+**VERIFIED COMPLETE** while the CLI and README did not exist (the agent's prose report caught it,
+but the gate - the skill's core promise - was wrong). Session 2 also left stale next actions.
+
+Fix (`supervisor.py` + SKILL.md, regression tests `test_gate_not_complete_while_next_actions_remain`,
+`test_next_clear_empties_list_and_unblocks_gate`):
+- `gate` returns PARTIALLY COMPLETE while any next action is recorded; `next --clear` closes it.
+- VERIFIED COMPLETE now states how many criteria it covers.
+- SKILL.md: criteria cover the whole agreed scope including deferred work; user clarifications
+  are recorded as decisions + criteria the moment they arrive.
+
+Replayed on the real session-2 state: before the fix `gate` → exit 0; after → exit 10 listing the
+stale actions; after `next --clear` → exit 0.
+
+RETEST_PLACEHOLDER
 
 ## 5. Refactor changes driven by these runs
 

@@ -97,7 +97,7 @@ skills/autonomous-supervisor/
 │                               # escalation, final-delivery, memory (manual fallback)
 └── references/                 # delegation rules, recovery procedures, host adaptation
 tests/
-├── test_supervisor_cli.py      # 24 behavioural tests of the CLI
+├── test_supervisor_cli.py      # 29 behavioural tests of the CLI
 ├── validate_skill.py           # structural lint (frontmatter, links, word budget)
 ├── scenarios/                  # 8 pressure scenarios + recorded results
 └── e2e/                        # benchmark brief, seeded starter, hidden acceptance oracle
@@ -106,7 +106,23 @@ tests/
 
 ## Benchmarks
 
-BENCHMARK_PLACEHOLDER
+Every number below comes from a real run in this repo's harness: same model, fresh context,
+identical prompts except *"read SKILL.md and follow it"*. Hidden acceptance tests were never
+shown to the agents. Details and transcripts summary: [`tests/scenarios/results.md`](tests/scenarios/results.md).
+
+| Test | Baseline (no skill) | With skill |
+|---|---|---|
+| 8 single-turn pressure scenarios | 8/8 correct | No regressions (Direct mode on trivial tasks, honest fallbacks) |
+| E2E build, one session | 18/18 · 94k tokens · 5 calls | 18/18 · 100k tokens · 8 calls · chose **Lite** mode |
+| Interruption, fully specified brief | 18/18 · no durable handoff | 18/18 · full `.supervisor/` memory |
+| **Interruption + user clarifications given mid-session** | **18/20**: session 2 *deleted* a user-requested feature as "scope creep" and dropped the exit-code override | **20/20**: both honoured via a binding decision, deviation from the brief disclosed |
+
+**Honest reading:** on small, fully specified, single-session work a strong model doesn't need
+this skill, and the skill costs about 6% more tokens. It pays off where real projects fail.
+Requirements that live in conversation, work that crosses sessions or context resets, and
+"done" claims that need to be audited. The benchmark also **caught a bug in the skill itself**:
+the gate passed on criteria that covered only one session's slice. The bug is fixed and covered
+by regression tests.
 
 ## Development
 

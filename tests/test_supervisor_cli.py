@@ -223,6 +223,31 @@ class TestResumeAndGate(CliTestCase):
         proc = self.run_cli("gate", expect=0)
         self.assertIn("VERIFIED COMPLETE", proc.stdout)
 
+    def _all_verified(self):
+        for ac in ("AC1", "AC2"):
+            self.run_cli("criterion", "verify", ac, "--evidence", "ok")
+        for t in ("T1", "T2", "T3"):
+            self.run_cli("task", "set", t, "verified", "--evidence", "ok")
+
+    def test_gate_not_complete_while_next_actions_remain(self):
+        # Regression: a session that scoped criteria to its own slice got VERIFIED
+        # COMPLETE while its next-actions list still held the deferred CLI work.
+        self._all_verified()
+        self.run_cli("next", "Build the CLI entry point")
+        proc = self.run_cli("gate", expect=10)
+        self.assertIn("next action", proc.stdout.lower())
+        self.assertIn("Build the CLI entry point", proc.stdout)
+
+    def test_next_clear_empties_list_and_unblocks_gate(self):
+        self._all_verified()
+        self.run_cli("next", "Build the CLI entry point")
+        self.run_cli("next", "--clear")
+        self.assertEqual(self.state()["next"], [])
+        self.run_cli("gate", expect=0)
+
+    def test_next_without_actions_or_clear_is_usage_error(self):
+        self.run_cli("next", expect=1)
+
     def test_dropped_task_does_not_block_gate(self):
         for ac in ("AC1", "AC2"):
             self.run_cli("criterion", "verify", ac, "--evidence", "ok")

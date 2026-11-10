@@ -30,9 +30,10 @@ If `.supervisor/state.json` already exists, you are **resuming**. Run `$SUP resu
 
 1. Inspect what exists (repo, docs, tests, prior memory) **before** asking anything.
 2. Write the brief using `templates/project-brief.md`: outcome, users, constraints, **explicit assumptions**, in-scope / optional / excluded.
-3. Turn "done" into checkable criteria: `$SUP init --objective "..."`, then `$SUP criterion add "..."` for each one. Each criterion has to be verifiable by a command or an observation.
+3. Turn "done" into checkable criteria: `$SUP init --objective "..."`, then `$SUP criterion add "..." "..."`. Each criterion has to be verifiable by a command or an observation. The criteria cover **the whole agreed project, including work deferred to a later session**. Deferred work stays as pending tasks. The gate's verdict covers only the criteria it knows about.
 4. Ask the user only if the answer would change the architecture or the scope **and** cannot be inferred. Ask once, batch the questions, and proceed on the stated assumptions while you wait.
 5. If the brief conflicts with existing code or tests, the brief wins. Record the conflict: `$SUP decide "..." --why "..."`.
+6. A user message that adds to or changes requirements gets recorded **the moment it arrives**: a `decide` with `--why "user clarification"`, plus a criterion for it. Chat is not memory. In testing, a fresh session that saw only the brief deleted a feature the user had requested in conversation.
 
 ## 3. Plan
 
@@ -113,7 +114,8 @@ Never ask the user to say "continue", to relay messages between agents, or to re
 ## 10. Finish honestly
 
 ```bash
-$SUP gate    # exit 0 VERIFIED COMPLETE | 10 PARTIALLY COMPLETE | 20 BLOCKED
+$SUP next --clear   # once nothing in scope remains; the gate refuses while next actions are recorded
+$SUP gate           # exit 0 VERIFIED COMPLETE | 10 PARTIALLY COMPLETE | 20 BLOCKED
 ```
 
 Report the gate's verdict word for word, using `templates/final-delivery.md`. That covers deliverables, how to use them, the evidence for each criterion, known limitations, and excluded scope. **Never call the work complete when the gate says otherwise.** Before delivering, also run `templates/verification-report.md` for any consequential integration.
