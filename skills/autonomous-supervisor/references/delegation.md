@@ -12,6 +12,11 @@
 
 Every subagent costs a context handoff in each direction. Spawn only when parallel time saved or context kept clean outweighs that.
 
+**Measured (this repo, `tests/scenarios/results.md` §6):** on a 3-module project where each track took
+2-3 tool calls, the supervisor plus 3 parallel workers matched a single agent's hidden score (21/21) and
+wrote 2.5x more tests, but cost ~3x the tokens and more wall time, because each worker pays a fixed ~90k-token
+context. Fan out when each track is substantial (more than ~10 tool calls or minutes of work), not for small modules.
+
 ## Role catalogue (use only what the project needs)
 
 | Role | Typical output | Verify by |

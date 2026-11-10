@@ -4,7 +4,7 @@ Detect capabilities from the tools you actually have; never assume them.
 
 | Host | Subagents | Parallel | Persistence | Notes |
 |---|---|---|---|---|
-| Claude Code (CLI / desktop / web) | `Agent` tool (types: general-purpose, Explore, Plan, ...) | Multiple `Agent` calls in one message; background agents | Files in repo; commit `.supervisor/` | Subagents usually cannot spawn subagents - keep delegation depth 1. Cloud sessions are ephemeral: commit and push memory. |
+| Claude Code (CLI / desktop / web) | `Agent` tool (types: general-purpose, Explore, Plan, ...) | Multiple `Agent` calls in one message; background agents | Files in repo; commit `.supervisor/` | Subagents have **no** spawn tool (verified: a spawned agent's tool list has no `Agent`). Only the top-level session can delegate. A supervisor running as a subagent uses Lite mode. Cloud sessions are ephemeral: commit and push memory. |
 | Codex / other CLI agents | Varies (spawn/exec tools) | Varies | Files in repo | Use whatever spawn tool exists; else sequential. |
 | Chat-only (no tools) | None | None | None | Sequential tracks; print memory at milestones for the user to save. |
 

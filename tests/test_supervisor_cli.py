@@ -292,3 +292,98 @@ class TestDurability(CliTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUpgrades(CliTestCase):
+    """v1.1 upgrades: drift detection, strategy cap, criterion drop, liveness, metrics, concurrency."""
+
+    def setUp(self):
+        super().setUp()
+        self.init("--max-attempts", "1")
+        (self.dir / "src").mkdir()
+        (self.dir / "src" / "core.py").write_text("x = 1\n")
+
+    def test_verified_task_whose_files_change_is_flagged_and_blocks_gate(self):
+        self.run_cli("criterion", "add", "Core works")
+        self.run_cli("task", "add", "Core", "--files", "src/*.py", "--criteria", "AC1")
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "test_core OK")
+        self.run_cli("criterion", "verify", "AC1", "--evidence", "test_core OK")
+        self.run_cli("gate", expect=0)
+        (self.dir / "src" / "core.py").write_text("x = 2  # edited after verification\n")
+        out = self.run_cli("resume").stdout
+        self.assertIn("changed since verification", out.lower())
+        self.assertIn("src/core.py", out)
+        proc = self.run_cli("gate", expect=10)
+        self.assertIn("T1", proc.stdout)
+        # re-verifying refreshes the fingerprint
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "test_core OK again")
+        self.run_cli("gate", expect=0)
+
+    def test_new_file_matching_owned_glob_counts_as_drift(self):
+        self.run_cli("task", "add", "Core", "--files", "src/")
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "ok")
+        (self.dir / "src" / "extra.py").write_text("y = 1\n")
+        self.assertIn("src/extra.py", self.run_cli("resume").stdout)
+
+    def test_strategy_cap_forces_escalation(self):
+        self.run_cli("task", "add", "Fix")
+        for i in (1, 2, 3):
+            self.run_cli("task", "strategy", "T1", f"approach {i}")
+        proc = self.run_cli("task", "strategy", "T1", "approach 4", expect=3)
+        self.assertIn("STRATEGY LIMIT", proc.stderr)
+
+    def test_criterion_drop_requires_reason_and_is_excluded_from_gate(self):
+        self.run_cli("criterion", "add", "Core works", "Excel input")
+        self.run_cli("criterion", "verify", "AC1", "--evidence", "ok")
+        self.run_cli("criterion", "drop", "AC2", expect=2)
+        self.run_cli("criterion", "drop", "AC2", "--reason", "needs third-party package")
+        proc = self.run_cli("gate", expect=0)
+        self.assertIn("excluded", proc.stdout.lower())
+        self.assertIn("needs third-party package", proc.stdout)
+
+    def test_resume_shows_running_since(self):
+        self.run_cli("task", "add", "Core")
+        self.run_cli("task", "set", "T1", "running", "--owner", "worker-1")
+        self.assertIn("running since", self.run_cli("resume").stdout)
+
+    def test_metrics_reported_in_status_and_gate(self):
+        self.run_cli("task", "add", "Core")
+        self.run_cli("task", "set", "T1", "running")
+        self.run_cli("task", "attempt", "T1", "--note", "nope", expect=3)
+        out = self.run_cli("status").stdout
+        self.assertIn("dispatches: 1", out)
+        self.assertIn("failed attempts: 1", out)
+
+    def test_concurrent_writers_do_not_lose_updates(self):
+        procs = [
+            subprocess.Popen([sys.executable, str(CLI), "task", "add", f"job {i}"], cwd=self.dir,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for i in range(20)
+        ]
+        for p in procs:
+            _, err = p.communicate()
+            self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(len(self.state()["tasks"]), 20)
+
+
+class TestSelfOwnedWork(CliTestCase):
+    """Dogfooding found the parallel limit counted the supervisor's own task."""
+
+    def setUp(self):
+        super().setUp()
+        self.init("--max-parallel", "2")
+        for name in ("A", "B", "Integration", "C"):
+            self.run_cli("task", "add", name)
+
+    def test_supervisor_owned_task_does_not_consume_agent_slot(self):
+        self.run_cli("task", "set", "T1", "running", "--owner", "worker-a")
+        self.run_cli("task", "set", "T2", "running", "--owner", "worker-b")
+        self.run_cli("task", "set", "T3", "running", "--owner", "supervisor")
+        proc = self.run_cli("task", "set", "T4", "running", "--owner", "worker-c", expect=3)
+        self.assertIn("parallel", proc.stderr.lower())
+
+    def test_self_owned_task_still_checked_for_file_overlap(self):
+        self.run_cli("task", "add", "Core", "--files", "src/core.py")
+        self.run_cli("task", "add", "Core again", "--files", "src/core.py")
+        self.run_cli("task", "set", "T5", "running", "--owner", "worker-a")
+        self.run_cli("task", "set", "T6", "running", "--owner", "self", expect=3)

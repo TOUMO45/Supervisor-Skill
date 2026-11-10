@@ -1,11 +1,14 @@
 {
   "name": "supervisor-skill",
-  "owner": { "name": "toumo45" },
+  "owner": {
+    "name": "Kamari Fatima Zuhra"
+  },
   "plugins": [
     {
       "name": "autonomous-supervisor",
       "source": "./",
       "description": "Autonomous project supervisor skill: plan, delegate, remember, verify, deliver."
     }
-  ]
+  ],
+  "description": "Autonomous Supervisor: an accountable team-lead skill for AI coding agents - plan, delegate, remember, verify, deliver."
 }

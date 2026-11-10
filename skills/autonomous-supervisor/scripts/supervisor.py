@@ -19,6 +19,7 @@ import argparse
 import contextlib
 import datetime as _dt
 import fnmatch
+import hashlib
 import json
 import os
 import sys
@@ -32,6 +33,8 @@ except ImportError:  # pragma: no cover - Windows
 
 SCHEMA_VERSION = 1
 TASK_STATES = ("pending", "running", "blocked", "done", "verified", "dropped")
+DEFAULT_MAX_STRATEGIES = 3
+SELF_OWNERS = {"self", "supervisor", "lead"}  # owners that are not delegated agents
 OPEN_TASK_STATES = ("pending", "running", "blocked", "done")
 EXIT_USAGE, EXIT_EVIDENCE, EXIT_GUARD, EXIT_PARTIAL, EXIT_BLOCKED = 1, 2, 3, 10, 20
 
@@ -129,6 +132,8 @@ def _task_line(tid, task):
         bits.append("files: " + ", ".join(f"`{f}`" for f in task["files"]))
     if task.get("attempts"):
         bits.append(f"attempts: {len(task['attempts'])}")
+    if task["status"] == "running" and task.get("started"):
+        bits.append(f"running since {task['started']}")
     line = "- " + " | ".join(bits)
     if task.get("strategy"):
         line += f"\n  - strategy: {task['strategy']}"
@@ -150,10 +155,13 @@ def render(state):
         f"**Budget:** max parallel {state['budget']['max_parallel']} | "
         f"max attempts per strategy {state['budget']['max_attempts']}",
         "",
+        f"**Effort:** {metrics(state)}",
+        "",
         "## Acceptance criteria",
     ]
     for cid, c in state["criteria"].items():
         ev = f" - evidence: {c['evidence']}" if c.get("evidence") else ""
+        ev += f" - reason: {c['reason']}" if c.get("reason") else ""
         out.append(f"- **{cid}** {c['text']} - `{c['status']}`{ev}")
     if not state["criteria"]:
         out.append("- _none yet_")
@@ -189,15 +197,55 @@ def patterns_overlap(a, b):
     )
 
 
+def project_root(directory):
+    return directory.resolve().parent
+
+
+def owned_files(root, patterns):
+    """Expand ownership patterns (globs or directories) to existing files, relative to root."""
+    found = set()
+    for pattern in patterns:
+        target = root / pattern
+        if pattern.endswith("/") or target.is_dir():
+            matches = target.rglob("*")
+        else:
+            matches = root.glob(pattern)
+        for path in matches:
+            if path.is_file() and "__pycache__" not in path.parts and ".supervisor" not in path.parts:
+                found.add(path.relative_to(root).as_posix())
+    return sorted(found)
+
+
+def fingerprint(root, patterns):
+    return {rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()[:16] for rel in owned_files(root, patterns)}
+
+
+def drift(root, task):
+    """Files added, removed or changed since the task was verified (empty if not tracked)."""
+    before = task.get("fingerprint")
+    if task["status"] != "verified" or before is None:
+        return []
+    after = fingerprint(root, task.get("files", []))
+    return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+
+
+def metrics(state):
+    tasks = state["tasks"].values()
+    return (f"dispatches: {state.get('dispatches', 0)} | failed attempts: {sum(len(t['attempts']) for t in tasks)}"
+            f" | strategy changes: {sum(t.get('strategies', 0) for t in tasks)}")
+
+
 def guard_start(state, tid, task):
     problems = []
     unmet = [d for d in task.get("depends", []) if state["tasks"][d]["status"] != "verified"]
     if unmet:
         problems.append(f"dependencies not verified: {', '.join(unmet)}")
     running = {k: t for k, t in state["tasks"].items() if t["status"] == "running" and k != tid}
+    # The limit caps delegated agents; the supervisor's own work never takes a slot.
+    delegated = [k for k, t in running.items() if (t.get("owner") or "").lower() not in SELF_OWNERS]
     limit = state["budget"]["max_parallel"]
-    if len(running) >= limit:
-        problems.append(f"parallel limit {limit} reached (running: {', '.join(running)})")
+    if (task.get("owner") or "").lower() not in SELF_OWNERS and len(delegated) >= limit:
+        problems.append(f"parallel limit {limit} reached (delegated running: {', '.join(delegated)})")
     for other_id, other in running.items():
         clashes = [
             f"{mine} ~ {theirs}"
@@ -221,7 +269,8 @@ def cmd_init(args, directory):
         "objective": one_line(args.objective),
         "created": now(),
         "updated": now(),
-        "budget": {"max_parallel": args.max_parallel, "max_attempts": args.max_attempts},
+        "budget": {"max_parallel": args.max_parallel, "max_attempts": args.max_attempts,
+                   "max_strategies": args.max_strategies},
         "counters": {},
         "criteria": {},
         "tasks": {},
@@ -246,6 +295,16 @@ def cmd_criterion(args, directory):
                 msgs.append(f"{cid} added")
         else:
             targets = [get(state, "criteria", item) for item in args.items]  # validate all first
+            if args.action == "drop":
+                if not args.reason:
+                    raise CliError("`drop` requires --reason (why this is out of scope)", EXIT_EVIDENCE)
+                for cid, crit in targets:
+                    crit.update(status="dropped", reason=one_line(args.reason), at=now())
+                    state["log"].append({"at": now(), "text": f"{cid} dropped: {crit['reason']}"})
+                    msgs.append(f"{cid} dropped")
+                save(directory, state)
+                print("\n".join(msgs))
+                return
             if not args.evidence:
                 raise CliError(f"`{args.action}` requires --evidence (command + observed result)", EXIT_EVIDENCE)
             for cid, crit in targets:
@@ -290,10 +349,17 @@ def cmd_task_set(args, directory):
         tid, task = get(state, "tasks", args.id)
         if args.status == "verified" and not args.evidence:
             raise CliError(f"{tid}: `verified` requires --evidence (command + observed result)", EXIT_EVIDENCE)
+        if args.owner:
+            task["owner"] = one_line(args.owner)
         if args.status == "running" and not args.force:
             problems = guard_start(state, tid, task)
             if problems:
                 raise CliError(f"GUARD {tid}: " + " | ".join(problems) + " (use --force to override deliberately)", EXIT_GUARD)
+        if args.status == "running" and task["status"] != "running":
+            task["started"] = now()
+            state["dispatches"] = state.get("dispatches", 0) + 1
+        if args.status == "verified":
+            task["fingerprint"] = fingerprint(project_root(directory), task.get("files", []))
         task["status"] = args.status
         if args.owner:
             task["owner"] = one_line(args.owner)
@@ -329,6 +395,12 @@ def cmd_task_strategy(args, directory):
     with locked(directory):
         state = load(directory)
         tid, task = get(state, "tasks", args.id)
+        cap = state["budget"].get("max_strategies", DEFAULT_MAX_STRATEGIES)
+        if task.get("strategies", 0) >= cap:
+            raise CliError(
+                f"STRATEGY LIMIT {tid}: {cap} strategies already tried. Escalate with the evidence log "
+                "(templates/escalation.md) instead of trying another approach.", EXIT_GUARD)
+        task["strategies"] = task.get("strategies", 0) + 1
         task["strategy"] = one_line(args.text)
         state["log"].append({"at": now(), "text": f"{tid} new strategy: {task['strategy']}"})
         save(directory, state)
@@ -399,12 +471,19 @@ def cmd_resume(args, directory):
         return lines
 
     by = lambda *s: [t for t, x in tasks.items() if x["status"] in s]  # noqa: E731
-    open_criteria = [c for c, x in state["criteria"].items() if x["status"] != "verified"]
+    root = project_root(directory)
+    drifted = {t: drift(root, x) for t, x in tasks.items()}
+    drifted = {t: files for t, files in drifted.items() if files}
+    open_criteria = [c for c, x in state["criteria"].items() if x["status"] not in ("verified", "dropped")]
     out = [
         f"# Resume brief ({state['updated']})",
         f"**Objective:** {state['objective']}",
+        f"**Effort so far:** {metrics(state)}",
         "",
-        *section("Do not redo - verified", by("verified")),
+        *section("Do not redo - verified and unchanged", [t for t in by("verified") if t not in drifted]),
+        "",
+        "## Changed since verification - re-verify before relying on these",
+        *([f"- **{t}** {tasks[t]['title']}: {', '.join(files)}" for t, files in drifted.items()] or ["- none"]),
         "",
         *section("In flight - collect reports or check liveness before re-dispatching", by("running")),
         "",
@@ -430,7 +509,9 @@ def cmd_gate(args, directory):
     state = load(directory)
     tasks, criteria = state["tasks"], state["criteria"]
     blocked = [(t, x) for t, x in tasks.items() if x["status"] == "blocked"]
-    unverified_criteria = [c for c, x in criteria.items() if x["status"] != "verified"]
+    unverified_criteria = [c for c, x in criteria.items() if x["status"] not in ("verified", "dropped")]
+    root = project_root(directory)
+    drifted = {t: drift(root, x) for t, x in tasks.items()}
     open_tasks = [t for t, x in tasks.items() if x["status"] in OPEN_TASK_STATES and x["status"] != "blocked"]
     problems = []
     if not criteria:
@@ -439,6 +520,7 @@ def cmd_gate(args, directory):
     problems += [f"{t} is `{tasks[t]['status']}`, not verified: {tasks[t]['title']}" for t in open_tasks]
     # Recorded next actions mean work is still planned. Either it is out-of-scope
     # follow-up (then `next --clear`) or the criteria don't cover the full scope.
+    problems += [f"{t} verified, but files changed since: {', '.join(f)} - re-verify" for t, f in drifted.items() if f]
     problems += [f"next action still recorded: {a} (do it, add it as a task, or `next --clear`)" for a in state["next"]]
     if blocked:
         print("BLOCKED")
@@ -452,10 +534,15 @@ def cmd_gate(args, directory):
         for p in problems:
             print(f"- {p}")
         raise SystemExit(EXIT_PARTIAL)
+    dropped = {c: x for c, x in criteria.items() if x["status"] == "dropped"}
+    criteria = {c: x for c, x in criteria.items() if x["status"] != "dropped"}
     print(f"VERIFIED COMPLETE ({len(criteria)} criteria - this verdict covers exactly these; "
           "confirm they span the whole agreed scope)")
     for c, x in criteria.items():
         print(f"- {c} {x['text']}: {x['evidence']}")
+    for c, x in dropped.items():
+        print(f"- excluded {c} {x['text']}: {x['reason']}")
+    print(f"Effort: {metrics(state)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -469,12 +556,14 @@ def build_parser():
     s.add_argument("--objective", required=True)
     s.add_argument("--max-parallel", type=int, default=3, help="max tasks running at once (default 3)")
     s.add_argument("--max-attempts", type=int, default=3, help="failed attempts per strategy before forced change (default 3)")
+    s.add_argument("--max-strategies", type=int, default=DEFAULT_MAX_STRATEGIES, help="strategies per task before escalation (default 3)")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("criterion", help="add | verify | fail an acceptance criterion")
-    s.add_argument("action", choices=("add", "verify", "fail"))
+    s.add_argument("action", choices=("add", "verify", "fail", "drop"))
     s.add_argument("items", nargs="+", help="one or more criterion texts (add) or ids (verify/fail)")
     s.add_argument("--evidence", help="command run + observed result")
+    s.add_argument("--reason", help="why the criterion is dropped from scope (drop)")
     s.set_defaults(fn=cmd_criterion)
 
     task = sub.add_parser("task", help="manage tasks").add_subparsers(dest="task_cmd", required=True)
