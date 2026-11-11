@@ -398,7 +398,10 @@ class TestSelfDescribingMemory(CliTestCase):
         self.init()
         memory = (self.dir / ".supervisor" / "MEMORY.md").read_text()
         self.assertIn("autonomous-supervisor", memory)
-        self.assertIn(f"{CLI.resolve()} resume", memory)
+        # the instruction must work on a machine where the recorded path does not exist (found on a fresh clone)
+        self.assertIn("<skill directory>/scripts/supervisor.py resume", memory)
+        self.assertIn(f"`{CLI.resolve()}`", memory)
+        self.assertIn("on another machine use the skill's own copy", memory)
 
     def test_state_json_records_cli_path(self):
         self.init()
