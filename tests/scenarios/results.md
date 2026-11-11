@@ -253,3 +253,32 @@ piping any command into `grep -q` printed a false "cannot write project memory" 
 
 **Limits:** reading cloud prompts is still expensive (events include every tool result), so the procedure reads
 session records for all sessions and prompts for selected ones, and says which were not read. n=2 per arm.
+
+## 12. Reading a project's entire cloud history (ECCode: 22 sessions, 5 weeks)
+
+Asked to study everything from the first prompt to today, the supervisor read 21 of 22 cloud sessions back
+to their first event, and the last 20 hours of the 22nd (stopped on budget: 224 pages for 20 hours of a
+hackathon side project; the rest is covered by that session's own continuation summary and stated as such).
+
+| Measure | Value |
+|---|---|
+| Pages of events paged | 989 (about 1 MB each on busy stretches) |
+| Typed prompts recovered | 139, including the original 12,697-character brief |
+| Harness lines filtered out | 63 (safety notices, continuation summaries, subagent briefs, images) |
+| Raw data entering the supervisor's context | none: pages are saved to files and parsed by `events` |
+| Paging agents | haiku, one per session queue, 110-call budget each, resumable cursor |
+| Analysis | 7 analysts by phase, each writing a cited requirements ledger |
+
+**Bugs found in the tool by real data, all fixed test-first:** strict JSON rejected pages with raw line
+breaks; a second save format nests the events as a JSON string inside a text block; harness messages were
+taken for typed prompts.
+
+**Process failures, kept for the record:**
+- A paging agent read "110 calls in total" as including earlier agents' calls and stopped after one page.
+  The brief now says whose calls count.
+- The supervisor first reported a "docs contradict themselves" finding from a subagent after confirming
+  only that the quoted sentences existed. Opening the files before "fixing" them showed two of the three
+  gaps were false alarms (a dated addendum that was true on its date; a troubleshooting table the checker
+  had missed). The audit was corrected, and `references/audit.md` now requires checking date and context.
+- End-of-turn summaries were captured at 2,500 characters at first, cutting some "decision needed"
+  sections; raised to 9,000 for the later sessions.

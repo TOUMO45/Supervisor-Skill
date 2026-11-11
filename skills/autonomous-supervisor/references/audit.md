@@ -57,6 +57,15 @@ If the host has session tools (in Claude Code: `list_sessions`, `get_session`, `
 
 The same `--extra` format works for chats the user exports or pastes.
 
+**Reading a whole long session cheaply (measured on 22 real sessions, 989 pages).** Ask for pages with
+**no kind filter**. An unfiltered page is large, so the host saves it to a file and returns only the path:
+nothing enters the agent's context. Run `events` on each saved file, delete it, and keep the cursor
+(`first_id`) in a small state file so another agent can continue. A filtered page is smaller and comes back
+inline, which is what fills the context. Paging is sequential per session, so run one cheap-model agent per
+session, in parallel, each with a call budget. Give the reading of the extracted prompts to analysts by
+phase, not to yourself. Expect harness text among the "user" events (safety notices, continuation
+summaries, goal check-ins): `events` drops the known kinds, and analysts should list any others as noise.
+
 ## Turning prompts into criteria
 
 - Read **every** prompt. One prompt often contains several requirements. Split them.
@@ -70,6 +79,11 @@ The same `--extra` format works for chats the user exports or pastes.
 
 ## Verifying
 
+- **A subagent's finding is also a claim.** Before you act on "X is missing" or "the docs contradict
+  themselves", open the source yourself. Check the **date and context** of a quoted sentence: a dated
+  addendum that was true on its date is not a contradiction with a later table. On one real audit two
+  of three reported documentation gaps were false alarms, caught only because the files were opened
+  before being "fixed".
 - **Final claims are leads, not evidence.** "All tests pass" from an old session proves nothing about today.
   Re-run the tests and exercise each criterion directly, for example by running the CLI with the flag or
   hitting the endpoint.
