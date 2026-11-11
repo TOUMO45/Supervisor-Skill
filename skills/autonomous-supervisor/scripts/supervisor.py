@@ -344,6 +344,8 @@ def cmd_init(args, directory):
     }
     with locked(directory):
         save(directory, state)
+        if not (directory / ".gitignore").exists():  # memory is committed; the lock and the raw harvest are not
+            atomic_write(directory / ".gitignore", ".lock\nharvest.md\n")
     print(f"initialised {directory}/ (state.json + MEMORY.md)")
 
 
@@ -524,7 +526,9 @@ def cmd_ask(args, directory):
             task = state["tasks"][tid]
             if task["status"] in ("verified", "dropped"):
                 raise CliError(f"{tid} is already {task['status']}: a question cannot block it")
-            task.update(status="blocked", note=f"waiting on {qid}: {one_line(args.text)}")
+            waiting = [q for q, x in open_questions(state).items() if tid in x.get("blocks", [])]
+            task.update(status="blocked", note=f"waiting on {', '.join(waiting)} (latest: {one_line(args.text)})"
+                        if len(waiting) > 1 else f"waiting on {qid}: {one_line(args.text)}")
         state["log"].append({"at": now(), "text": f"{qid} asked: {one_line(args.text)}"})
         save(directory, state)
     print(f"{qid} recorded" + (f"; blocked {', '.join(blocks)}" if blocks else "; nothing blocked: continue on the default"))

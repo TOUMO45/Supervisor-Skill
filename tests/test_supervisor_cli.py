@@ -52,6 +52,8 @@ class TestInitAndRender(CliTestCase):
         self.assertEqual(st["objective"], "Ship a CSV-to-Markdown CLI")
         memory = (self.dir / ".supervisor" / "MEMORY.md").read_text()
         self.assertIn("Ship a CSV-to-Markdown CLI", memory)
+        # committing .supervisor/ must not commit the lock file or the raw prompt harvest
+        self.assertEqual((self.dir / ".supervisor" / ".gitignore").read_text().split(), [".lock", "harvest.md"])
 
     def test_init_refuses_to_overwrite_existing_project(self):
         self.init()
@@ -1063,6 +1065,7 @@ class TestOwnerQuestions(CliTestCase):
     def test_task_blocked_by_two_questions_waits_for_both(self):
         self.run_cli("ask", "Budget?", "--default", "none", "--blocks", "T2")
         self.run_cli("ask", "Which machine?", "--default", "CI", "--blocks", "T2")
+        self.assertIn("waiting on Q1, Q2", self.state()["tasks"]["T2"]["note"])   # not only the latest question
         self.run_cli("answer", "Q1", "5 dollars")
         self.assertEqual(self.state()["tasks"]["T2"]["status"], "blocked")
         self.run_cli("answer", "Q2", "--accept")
