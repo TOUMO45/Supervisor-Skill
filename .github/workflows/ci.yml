@@ -1,0 +1,43 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Lint skill structure
+        run: python tests/validate_skill.py
+      - name: CLI behaviour tests
+        run: python -m unittest discover -s tests -v
+      - name: Benchmark oracle self-check (reference implementation must score 18/18)
+        run: python -I tests/e2e/hidden_acceptance.py tests/e2e/reference
+      - name: Parallel benchmark oracle self-check (reference must score 21/21)
+        run: python -I tests/e2e/parallel/hidden_acceptance.py tests/e2e/parallel/reference
+      - name: Eval scaffolds seed their workspaces
+        run: |
+          for c in $(find evals -name scaffold.sh); do d=$(mktemp -d); (cd "$d" && bash "$GITHUB_WORKSPACE/$c") || exit 1; done
+      - name: Audit mode end-to-end (harvest finds the buried chat requirement; oracle confirms the gaps)
+        run: |
+          python tests/e2e/audit/make_fixture.py /tmp/audit >/dev/null
+          cd /tmp/audit/project
+          python "$GITHUB_WORKSPACE/skills/autonomous-supervisor/scripts/supervisor.py" harvest --transcripts /tmp/audit/transcripts
+          grep -q "3 human prompt" .supervisor/harvest.md
+          grep -q "must exit with code 3" .supervisor/harvest.md
+          grep -q "CSVMD_MAX_WIDTH" .supervisor/harvest.md
+          ! grep -q "test_core ... ok" .supervisor/harvest.md
+          ! python -I "$GITHUB_WORKSPACE/tests/e2e/hidden_acceptance.py" . --clarified
+      - name: Audit mode, branch trap (latest work on an unfetched branch must be found)
+        run: |
+          python tests/e2e/audit/make_branch_fixture.py /tmp/bf >/dev/null
+          cd /tmp/bf/project
+          SUP="python $GITHUB_WORKSPACE/skills/autonomous-supervisor/scripts/supervisor.py"
+          $SUP branches | grep -q "NOT fetched locally: feature/search-export"
+          $SUP branches --fetch | grep -q "LATEST WORK: feature/search-export is 4 commit(s) ahead"
