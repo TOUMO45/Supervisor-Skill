@@ -840,6 +840,17 @@ class TestEventsImport(CliTestCase):
         rec = json.loads(self.out.read_text().splitlines()[0])
         self.assertEqual(rec["text"], "line one\nline two")
 
+    def test_events_nested_as_a_json_string_inside_a_text_block(self):
+        # A second real save format: [{"type":"text","text":"<wrapper>{...events JSON...}</wrapper>"}]
+        inner = json.loads(self.page.read_text().split("\n", 2)[2].rsplit("\n", 1)[0])
+        wrapped = [{"type": "text", "text": '<other-session nonce="n">\nnote:\n    ' + json.dumps(inner) + "\n</other-session>"}]
+        page = self.dir / "toolu_x.json"
+        page.write_text(json.dumps(wrapped, indent=2))
+        self.run_cli("events", str(page), "--session", "session_Z", "--out", str(self.out))
+        recs = [json.loads(line) for line in self.out.read_text().splitlines()]
+        self.assertEqual([r["text"] for r in recs if r["kind"] == "prompt"],
+                         ["MASTER PROMPT: write addendum 3.\nDo not push.", "I authorize the push"])
+
     def test_file_without_events_is_a_clean_error(self):
         bad = self.dir / "bad.txt"
         bad.write_text("no json here")

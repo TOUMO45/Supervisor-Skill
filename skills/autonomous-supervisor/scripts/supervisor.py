@@ -835,6 +835,9 @@ def _messages(node, ts=None):
     elif isinstance(node, list):
         for value in node:
             yield from _messages(value, ts)
+    elif isinstance(node, str) and '"message"' in node and len(node) > 200:
+        for value in _json_values(node):  # some hosts save the events as a JSON string inside a text block
+            yield from _messages(value, ts)
 
 
 def cmd_events(args, directory):
