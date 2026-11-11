@@ -1,6 +1,6 @@
 ---
 name: autonomous-supervisor
-description: Use when the user hands over a project to deliver, build, or finish from a brief, spec, PRD, idea, or master prompt ("here's the brief", "build me...", "deliver this", "finish this project") - especially when the work spans several steps, sessions, or agents, must survive a handoff or interruption, or gets requirements added mid-conversation. Also use when continuing or resuming an interrupted project or a repo with a .supervisor/ directory, and when asked to audit an old or interrupted project against everything that was asked, or whether it is really done or ready to ship. Not for single edits, typos, or quick questions.
+description: Use when the user hands over a project to deliver, build, or finish from a brief, spec, PRD, idea, or master prompt ("here's the brief", "build me...", "deliver this", "finish this project") - especially when the work spans several steps, sessions, or agents, must survive a handoff or interruption, or gets requirements added mid-conversation. Also use when continuing or resuming an interrupted project or a repo with a .supervisor/ directory, and when asked to audit an old or interrupted project against everything that was asked. Also use for any check of whether work is really complete, done, or ready to ship, including a short verdict on work that workers or agents report as "done" or "all tests pass". Not for single edits, typos, or questions unrelated to a project's status.
 ---
 
 # Autonomous Supervisor
@@ -23,7 +23,7 @@ Chain updates with `&&`; `criterion add`/`verify` take several items.
 | **Lite** | One session, a handful of mostly sequential tasks | `init`, criteria, `gate`. Do the work yourself. |
 | **Full** | Several milestones, substantial independent tracks, or likely to outlive one context window | Everything below. |
 
-If `.supervisor/state.json` exists, you are **resuming**: run `$SUP resume` first (§7). If the user asks whether past work is complete, or the project predates this skill, **audit** it first (§11).
+If `.supervisor/state.json` exists, you are **resuming**: run `$SUP resume` first (§7). Asked whether work is complete: run `$SUP gate` and report its verdict; if the project predates this skill, **audit** it (§11).
 
 ## 2. Define success before planning
 
@@ -31,8 +31,8 @@ If `.supervisor/state.json` exists, you are **resuming**: run `$SUP resume` firs
 2. Write the brief with `templates/project-brief.md`: outcome, constraints, **explicit assumptions**, and scope (in / optional / excluded).
 3. `$SUP init --objective "..."`, then `$SUP criterion add "..." "..."`. Each criterion must be checkable by a command or an observation. Criteria cover **the whole agreed project, including work deferred to a later session**: the gate judges only those.
 4. Don't ask what you can infer or decide (§9).
-5. When the brief conflicts with existing code or tests, the brief wins: `$SUP decide "..." --why "..."`.
-6. A user message that adds or changes requirements is recorded **when it arrives**: a `decide --why "user clarification"` plus a criterion. In testing, a fresh session deleted a feature requested only in chat.
+5. Brief conflicts with existing code or tests: the brief wins (`$SUP decide "..." --why "..."`).
+6. A user message that adds or changes requirements is recorded **when it arrives**: a `decide --why "user clarification"` plus a criterion. A fresh session once deleted a feature requested only in chat.
 
 ## 3. Plan
 
@@ -51,12 +51,12 @@ $SUP task add "CLI flags" --depends T1 --criteria AC3 --files "csvmd/__main__.py
 $SUP ready      # pending tasks whose dependencies are verified
 ```
 
-Critical path first; simplest design that works.
+Riskiest work first; simplest design that works.
 
 ## 4. Delegate, or do it yourself
 
-Only the top-level session can delegate. Each subagent costs a fresh context, so delegate only when it **wins**:
-- independent tracks that are each substantial (more than ~10 tool calls),
+Only the top-level session can delegate. A subagent costs a fresh context: delegate only when it **wins**:
+- independent, substantial tracks (over ~10 tool calls each),
 - a large read where you need only the conclusion,
 - a review you want unanchored from your own reasoning.
 
@@ -94,7 +94,7 @@ Triage playbook: `references/recovery.md`.
 
 ## 7. Memory and resumption
 
-Update memory at milestones, before handoffs, and when context runs low. Keep `$SUP next "..."` current. In an ephemeral container, commit `.supervisor/`.
+Update memory at milestones, before handoffs, and when context runs low. Keep `$SUP next "..."` current. Commit `.supervisor/`.
 
 After an interruption, run `$SUP resume` and act in its order: don't redo *verified and unchanged*; re-verify *changed*; for *in flight*, check the agent's report or files first; verify *done*; recheck *blocked*; start *ready*. Decisions are binding; reversing one takes a new `decide`.
 
@@ -105,7 +105,7 @@ After an interruption, run `$SUP resume` and act in its order: don't redo *verif
 | Parallel running tasks | 3 (`--max-parallel`) | Queue it |
 | Failed attempts per strategy | 3 (`--max-attempts`) | New strategy |
 | Strategies per task | 3 (`--max-strategies`) | Escalate |
-| Scope | Agreed criteria | Stop when the gate passes; offer extras, don't build them |
+| Scope | Agreed criteria | Stop when the gate passes |
 
 ## 9. Decide yourself; ask only for four things
 
@@ -128,7 +128,7 @@ $SUP next --clear   # the gate refuses while next actions remain
 $SUP gate           # 0 VERIFIED COMPLETE | 10 PARTIALLY COMPLETE | 20 BLOCKED
 ```
 
-Report the gate's verdict verbatim, including any unconfirmed assumptions, with `templates/final-delivery.md` (and `templates/verification-report.md` for consequential integrations). **Never call the work complete when the gate disagrees.**
+Report the gate's verdict verbatim, assumptions included, with `templates/final-delivery.md` (`templates/verification-report.md` for consequential integrations). **Never call the work complete when the gate disagrees.**
 
 ## 11. Audit an existing project
 
@@ -146,13 +146,13 @@ What was *asked* lives in past conversations; the newest work may be on another 
 |---|---|
 | Subagents (or *you* are one) | Run the tracks sequentially and say so. |
 | Script execution, or the CLI exits `4` (read-only shell) | **Before you finish**, write progress to `.supervisor/MANUAL.md` following `templates/memory.md`; `resume` shows it. Apply the guards yourself and say the gate is manual. |
-| Persistence | Print the memory at milestones for the user to save. |
+| Persistence | Print the memory for the user to save. |
 
 More: `references/host-adaptation.md`.
 
 ## Red flags: stop and correct
 
-- You claim "tests pass" without your own output.
+- "Tests pass" without your own output.
 - Saying "complete" while `gate` exits non-zero.
 - A user requirement, or a question for the owner, that exists only in chat.
 - Asking the owner something reversible, or stopping while unblocked work remains.

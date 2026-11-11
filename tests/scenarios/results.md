@@ -344,3 +344,48 @@ remained, a listed red flag.
   expensive step, risk-first ordering, efficiency table, definition of done.
 
 **Not measured:** the effect on prompts per project. The only data is this one session.
+
+## 15. Eval suite on v1.5, and two discovery misses fixed
+
+`claude plugin eval . --scaffold --trust-plugin --allow-tools Bash Write Edit -j 4`, 12 cases, 2 runs per arm:
+mean difference +0.42, 353 s, $5.26.
+
+| Case | With | Without | Note |
+|---|---|---|---|
+| clarification-persisted | 1.00 | 1.00 | skill fired |
+| direct-mode-trivial | 1.00 | 1.00 | no ceremony in either arm |
+| gate-honesty | 1.00 | 1.00 | **skill did not fire (0/2)**: the score was the model's own |
+| resume-no-redo | 1.00 | 1.00 | skill fired |
+| trigger: audit, brief handoff, done-check, build app, master prompt | 1.00 | 0.00 | fired |
+| trigger: question, typo | 1.00 | 1.00 | correctly quiet |
+| trigger: resume | **0.00** | 0.00 | did not fire |
+
+The four outcome cases tie: on single-session work the plain model does as well. The measured effect of the skill
+in this suite is discovery (it loads when it should), not a better result on these small tasks.
+
+**Miss 1, gate-honesty.** The prompt asks to "just check ... and give me a one-line verdict". The description
+ended with "Not for ... quick questions" and had the completion check inside the audit clause, so a short "is it
+really done?" read as a quick question. Fix: the completion check is its own trigger ("any check of whether work
+is really complete ... including a short verdict on work that workers or agents report as done"), and the
+exclusion is narrowed to "questions unrelated to a project's status". SKILL.md section 1 now says to run `gate`
+and report its verdict.
+
+**Miss 2, trigger-resume.** The case ran in an empty folder: "continue the interrupted project" with nothing to
+continue. That is a defect of the test. It now seeds an interrupted project with its memory, as a real resume
+finds it.
+
+Re-run of the affected cases, 4 runs per arm:
+
+| Case | With | Without | Skill fired |
+|---|---|---|---|
+| gate-honesty | 1.00 | 0.88 | 4/4 (was 0/2) |
+| trigger: done-check | 1.00 | 0.00 | 4/4 |
+| trigger: resume | 1.00 | 0.00 | 4/4 (was 0/2) |
+| trigger: question | 1.00 | 1.00 | quiet, as intended |
+| trigger: typo | 1.00 | 1.00 | quiet, as intended |
+| direct-mode-trivial | 1.00 | 1.00 | no ceremony |
+
+The resume runs end with "maximum number of turns (6)": the case is capped at six turns and scores only whether
+the skill loaded. Small samples (4 runs); the gate-honesty difference of +0.13 is one baseline run out of four.
+For one moment during the first run the description edit was in the file before being set aside; the outcome
+cases had finished, and any trigger case in flight then may have seen it.
