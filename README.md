@@ -85,10 +85,22 @@ The supervisor finds this project's past Claude Code sessions on its own (`~/.cl
 against the code **as it is now**, so old claims and passing tests don't count as proof.
 
 ```bash
+$SUP branches    # every branch vs the default: ahead/behind, merged?, and where the LATEST work is
 $SUP sessions    # one line per past session: dates, prompt count, the original goal
 $SUP harvest     # .supervisor/harvest.md: all prompts + final claims, secrets redacted, git-ignored
 $SUP criterion add "missing file exits 3" --source H2   # requirement traced to the prompt it came from
+$SUP criterion unverifiable AC5 --reason "needs the real server"   # neither passed nor failed
 ```
+
+Three traps it handles, each found by auditing a real project with 20 branches and 22 cloud sessions:
+
+- **The newest work isn't on the default branch.** A default checkout often shows one branch. `branches`
+  warns, lists what the remote has, and `--fetch` brings it in. Work on an unmerged branch is reported as
+  *built but unmerged*, not *missing*.
+- **The sessions aren't on this machine.** Cloud or other-computer sessions are merged with
+  `harvest --extra`; `events` copies typed prompts out of saved session dumps exactly. Sessions whose
+  prompts were not read are listed in the coverage, with a count of how many ended waiting on the user.
+- **Some things can't be checked here.** `unverifiable` keeps "not yet proven" apart from "failed".
 
 The report (`templates/audit-report.md`) includes a traceability table, claims vs. reality, and a
 mandatory **coverage** section listing the sessions read and the sources it *couldn't* see, such as
@@ -120,7 +132,7 @@ skills/autonomous-supervisor/
 │                               # escalation, final-delivery, memory (manual fallback)
 └── references/                 # delegation rules, recovery procedures, host adaptation, audit mode
 tests/
-├── test_supervisor_cli.py      # 53 behavioural tests of the CLI (incl. concurrency, harvest)
+├── test_supervisor_cli.py      # 70 behavioural tests of the CLI (incl. concurrency, harvest, branches)
 ├── validate_skill.py           # structural lint (frontmatter, links, word budget)
 ├── scenarios/                  # 8 pressure scenarios + recorded results
 └── e2e/                        # benchmark briefs, seeded starter, hidden acceptance oracles,
@@ -142,6 +154,7 @@ shown to the agents. Details and transcripts summary: [`tests/scenarios/results.
 | E2E build, one session | 18/18 · 94k tokens · 5 calls | 18/18 · 100k tokens · 8 calls · chose **Lite** mode |
 | Interruption, fully specified brief | 18/18 · no durable handoff | 18/18 · full `.supervisor/` memory |
 | Full mode: 3 parallel workers vs one agent (`textkit`) | 21/21 · 14 tests · 92k tokens · 28s | 21/21 · **35 tests** · ~3x tokens · 71s · zero file conflicts |
+| **Audit where the work sits on an unfetched branch** (2 runs each) | skill v1.2: **0/2**, reported built features as "missing" | skill v1.3: **2/2**, "built but unmerged", sync marked unverifiable |
 | **Audit this repo against its real 5.8 MB session history** (location not given) | Correct verdict · 139k tokens · 20 tool calls · partly quoted the old session's own notes | Correct verdict · **116k tokens · 13 tool calls** · verified each gap directly · coverage stated |
 | **Interruption + user clarifications given mid-session** | **18/20**: session 2 *deleted* a user-requested feature as "scope creep" and dropped the exit-code override | **20/20**: both honoured via a binding decision, deviation from the brief disclosed |
 

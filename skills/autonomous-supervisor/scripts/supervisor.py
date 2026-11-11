@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -307,13 +308,15 @@ def cmd_criterion(args, directory):
                 msgs.append(f"{cid} added")
         else:
             targets = [get(state, "criteria", item) for item in args.items]  # validate all first
-            if args.action == "drop":
+            if args.action in ("drop", "unverifiable"):
+                status = "dropped" if args.action == "drop" else "unverifiable"
                 if not args.reason:
-                    raise CliError("`drop` requires --reason (why this is out of scope)", EXIT_EVIDENCE)
+                    why = "why this is out of scope" if status == "dropped" else "what is needed to check it"
+                    raise CliError(f"`{args.action}` requires --reason ({why})", EXIT_EVIDENCE)
                 for cid, crit in targets:
-                    crit.update(status="dropped", reason=one_line(args.reason), at=now())
-                    state["log"].append({"at": now(), "text": f"{cid} dropped: {crit['reason']}"})
-                    msgs.append(f"{cid} dropped")
+                    crit.update(status=status, reason=one_line(args.reason), at=now())
+                    state["log"].append({"at": now(), "text": f"{cid} {status}: {crit['reason']}"})
+                    msgs.append(f"{cid} {status}")
                 save(directory, state)
                 print("\n".join(msgs))
                 return
@@ -533,7 +536,12 @@ def cmd_gate(args, directory):
     if not criteria:
         problems.append("no acceptance criteria defined - completion cannot be judged")
     tag = lambda c: f" [{criteria[c]['source']}]" if criteria[c].get("source") else ""  # noqa: E731
-    problems += [f"{c}{tag(c)} not verified ({criteria[c]['status']}): {criteria[c]['text']}" for c in unverified_criteria]
+    problems += [
+        f"{c}{tag(c)} could not be verified here (neither passed nor failed): {criteria[c]['text']} - needs: "
+        f"{criteria[c].get('reason', '?')}" if criteria[c]["status"] == "unverifiable"
+        else f"{c}{tag(c)} not verified ({criteria[c]['status']}): {criteria[c]['text']}"
+        for c in unverified_criteria
+    ]
     problems += [f"{t} is `{tasks[t]['status']}`, not verified: {tasks[t]['title']}" for t in open_tasks]
     # Recorded next actions mean work is still planned. Either it is out-of-scope
     # follow-up (then `next --clear`) or the criteria don't cover the full scope.
@@ -575,7 +583,7 @@ SECRET_PATTERNS = [
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "aws-key"),
     (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "slack-token"),
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}"), "bearer-token"),
-    (re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token)\b(\s*[:=]\s*)\S+"), "credential"),
+    (re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|(?:access[_-]?|auth[_-]?)?token)\b(\s*[:=]\s*)\S+"), "credential"),
 ]
 NOISE_PREFIXES = ("<task-notification", "<system-reminder", "Stop hook feedback", "Caveat:", "<local-command",
                   "[Request interrupted", "<command-stdout", "Base directory for this skill")
@@ -682,11 +690,49 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit] + f"\n…[truncated {len(text) - limit} chars]"
 
 
+def load_extra(paths, sessions):
+    """Merge sessions collected elsewhere (cloud, other machines) from JSONL lines:
+    {"kind":"session","id":..,"title":..,"start":..,"end":..,"status":..,"note":..}
+    {"kind":"prompt","session":..,"timestamp":..,"text":..}   {"kind":"claim","session":..,"text":..}"""
+    by_id = {s["id"]: s for s in sessions}
+    skipped = 0
+    for path in paths or []:
+        try:
+            lines = Path(path).expanduser().read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            raise CliError(f"cannot read --extra file {path}: {exc.strerror}") from exc
+        for line in filter(str.strip, lines):
+            try:
+                rec = json.loads(line)
+                sid = str(rec.get("session") or rec["id"])
+            except (json.JSONDecodeError, KeyError, AttributeError, TypeError):
+                skipped += 1
+                continue
+            s = by_id.setdefault(sid, {"id": sid, "start": None, "end": None, "prompts": [], "claim": None,
+                                       "skipped": 0, "known": True})
+            kind = rec.get("kind", "prompt")
+            if kind == "session":
+                s.update(known=True, title=rec.get("title"), status=rec.get("status"), note=rec.get("note"),
+                         start=rec.get("start") or s["start"], end=rec.get("end") or s["end"])
+            elif kind == "claim":
+                s["claim"] = str(rec.get("text", "")).strip() or s["claim"]
+            elif str(rec.get("text", "")).strip():
+                ts = rec.get("timestamp") or ""
+                s["prompts"].append((ts, str(rec["text"]).strip()))
+                if ts:
+                    s["start"] = min(filter(None, [s["start"], ts]))
+                    s["end"] = max(filter(None, [s["end"], ts]))
+    return list(by_id.values()), skipped
+
+
 def load_sessions(args):
     project = Path(args.project or Path.cwd()).resolve()
     files, searched = find_transcripts(project, args.transcripts)
     sessions = [parse_session(f) for f in files]
     sessions = [s for s in sessions if s["prompts"] or s["claim"]]
+    sessions, args.extra_skipped = load_extra(getattr(args, "extra", None), sessions)
+    for s in sessions:
+        s["prompts"].sort(key=lambda p: p[0])
     sessions.sort(key=lambda s: s["start"] or "")
     if not sessions:
         raise CliError(
@@ -699,13 +745,22 @@ def load_sessions(args):
 def cmd_sessions(args, directory):
     _, sessions, _ = load_sessions(args)
     for s in sessions:
-        first = one_line(redact(s["prompts"][0][1]))[:90] if s["prompts"] else "(no human prompt)"
+        first = one_line(redact(s["prompts"][0][1]))[:90] if s["prompts"] else (
+            f"(prompts NOT read) {one_line(redact(s.get('title') or ''))}" if s.get("known") else "(no human prompt)")
         print(f"{s['id']}  {(s['start'] or '?')[:16]} -> {(s['end'] or '?')[:16]}  "
               f"prompts: {len(s['prompts'])}  first: \"{first}\"")
 
 
 def cmd_harvest(args, directory):
     project, sessions, searched = load_sessions(args)
+    unread = [s for s in sessions if not s["prompts"]]
+    sessions = [s for s in sessions if s["prompts"]] + [s for s in unread if s["claim"] and not s.get("known")]
+    unread = [s for s in unread if s.get("known")]
+    skipped = sum(s["skipped"] for s in sessions) + args.extra_skipped
+    with_status = [s for s in sessions + unread if s.get("status")]
+    tally = {}
+    for s in with_status:
+        tally[one_line(s["status"]).lower()] = tally.get(one_line(s["status"]).lower(), 0) + 1
     total = sum(len(s["prompts"]) for s in sessions)
     out = [
         "# Requirement harvest",
@@ -719,8 +774,11 @@ def cmd_harvest(args, directory):
         "",
         "## Coverage",
         f"- Searched: {', '.join(searched)}",
-        f"- Sessions read: {len(sessions)}; human prompts: {total}; unreadable lines skipped: "
-        f"{sum(s['skipped'] for s in sessions)}",
+        f"- Sessions read: {len(sessions)}; human prompts: {total}; {skipped} unreadable line(s) skipped",
+        *([f"- **{len(unread)} known session(s) whose prompts were not read** (listed below): anything asked only "
+           "there is NOT covered by this audit"] if unread else []),
+        *([f"- Final status of the {len(with_status)} known session(s): "
+           + ", ".join(f"{k} {v}" for k, v in sorted(tally.items()))] if with_status else []),
         "- **Not covered:** chats outside this machine's Claude Code history (claude.ai, other computers, cloud "
         "sessions), issue trackers, and anything said outside a chat. Ask for them or say the audit excludes them.",
     ]
@@ -734,13 +792,150 @@ def cmd_harvest(args, directory):
         if s["claim"]:
             claim = "\n".join("> " + line if line else ">" for line in _clip(s["claim"], 1500).splitlines())
             out += ["", f"**Final claim at end of session {i}** (a lead, not evidence):", claim]
+    if unread:
+        cell = lambda v: one_line(redact(str(v or "-"))).replace("|", "/")  # noqa: E731
+        out += ["", "## Sessions known, prompts NOT read", "",
+                "| Session | Title | Start -> end | Final status | Waiting on / note |", "|---|---|---|---|---|"]
+        out += [f"| `{s['id']}` | {cell(s.get('title'))} | {(s['start'] or '?')[:16]} -> {(s['end'] or '?')[:16]} | "
+                f"{cell(s.get('status'))} | {cell(s.get('note'))} |" for s in unread]
     directory.mkdir(parents=True, exist_ok=True)
     atomic_write(directory / "harvest.md", "\n".join(out) + "\n")
     ignore = directory / ".gitignore"
     existing = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
     if "harvest.md" not in existing.split():
         atomic_write(ignore, existing + ("" if not existing or existing.endswith("\n") else "\n") + "harvest.md\n")
-    print(f"harvested {total} human prompt(s) from {len(sessions)} session(s) -> {directory}/harvest.md")
+    print(f"harvested {total} human prompt(s) from {len(sessions)} session(s) -> {directory}/harvest.md"
+          + (f"; {len(unread)} more session(s) known but NOT read" if unread else ""))
+
+
+def _json_values(raw):
+    """Every top-level JSON value in a text that may wrap them in other content (host-saved tool results)."""
+    decoder, pos = json.JSONDecoder(), 0
+    while True:
+        starts = [i for i in (raw.find("{", pos), raw.find("[", pos)) if i >= 0]
+        if not starts:
+            return
+        try:
+            value, end = decoder.raw_decode(raw, min(starts))
+            yield value
+            pos = end
+        except json.JSONDecodeError:
+            pos = min(starts) + 1
+
+
+def _messages(node, ts=None):
+    """Walk any JSON shape and yield (timestamp, wrapper, message) for each {message: {role, content}}."""
+    if isinstance(node, dict):
+        ts = node.get("created_at") or node.get("timestamp") or ts
+        message = node.get("message")
+        if isinstance(message, dict) and message.get("role") in ("user", "assistant") and "content" in message:
+            yield ts, node, message
+        for value in node.values():
+            yield from _messages(value, ts)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _messages(value, ts)
+
+
+def cmd_events(args, directory):
+    """Turn saved session-event dumps (e.g. large `list_events` results) into --extra lines, copied exactly."""
+    prompts, claim = {}, None
+    for path in args.files:
+        try:
+            raw = Path(path).expanduser().read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise CliError(f"cannot read {path}: {exc.strerror}") from exc
+        for value in _json_values(raw):
+            for ts, wrapper, message in _messages(value):
+                text, has_tool_result = _text_of(message["content"])
+                if message["role"] == "assistant":
+                    if text.strip() and (claim is None or (ts or "") >= claim[0]):
+                        claim = (ts or "", text.strip())
+                    continue
+                text = SYSTEM_REMINDER.sub("", text).strip()
+                if text and not has_tool_result and "tool_use_result" not in wrapper and _is_human(wrapper, text):
+                    prompts[(ts or "", text)] = None
+    if not prompts and claim is None:
+        raise CliError("no session events found in the given file(s): expected JSON containing "
+                       '{"message": {"role": ..., "content": ...}} objects')
+    lines = [json.dumps({"kind": "prompt", "session": args.session, "timestamp": ts, "text": text}, ensure_ascii=False)
+             for ts, text in sorted(prompts)]
+    if claim:
+        lines.append(json.dumps({"kind": "claim", "session": args.session, "text": claim[1][:1500]}, ensure_ascii=False))
+    with open(args.out, "a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    print(f"{len(prompts)} typed prompt(s)" + (" + final claim" if claim else "") + f" for {args.session} -> {args.out}")
+
+
+def cmd_branches(args, directory):
+    """Where does the latest work live? The default branch is not always it."""
+    root = str(Path(args.project or Path.cwd()))
+
+    def git(*argv):
+        return subprocess.run(["git", "-C", root, *argv], capture_output=True, text=True)
+
+    if git("rev-parse", "--git-dir").returncode != 0:
+        raise CliError(f"{root} is not a git repository")
+    notes = []
+    if args.fetch:
+        fetched = git("fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*")
+        if fetched.returncode != 0:
+            notes.append(f"fetch failed: {one_line(fetched.stderr)[:160]}")
+    default = git("symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD").stdout.strip() \
+        or git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    fmt = "%(refname)\t%(committerdate:iso-strict)\t%(subject)"
+    refs = {}
+    for line in git("for-each-ref", f"--format={fmt}", "refs/remotes", "refs/heads").stdout.splitlines():
+        ref, date, subject = (line.split("\t") + ["", ""])[:3]
+        if ref.endswith("/HEAD"):
+            continue
+        short = ref.replace("refs/remotes/", "").replace("refs/heads/", "")
+        name = short.split("/", 1)[1] if ref.startswith("refs/remotes/") and "/" in short else short
+        if ref.startswith("refs/remotes/") or name not in refs:  # prefer the remote's view of a branch
+            refs[name] = (short, date, subject)
+    rows = []
+    for name, (short, date, subject) in refs.items():
+        if short == default:
+            continue
+        counts = git("rev-list", "--left-right", "--count", f"{default}...{short}").stdout.split()
+        behind, ahead = (int(counts[0]), int(counts[1])) if len(counts) == 2 else (0, 0)
+        if ahead == 0:
+            state = "merged"
+        elif git("diff", "--quiet", default, short).returncode == 0:
+            state = "merged (same content)"
+        else:
+            state = "unmerged"
+        rows.append((ahead, behind, name, date, state, subject))
+    rows.sort(key=lambda r: (r[3], r[0]), reverse=True)  # newest first: most commits is not most recent
+    print(f"default branch: {default}  ({len(rows) + 1} branch(es) known locally)")
+    print("| Branch | Ahead | Behind | Last commit | State | Last subject |\n|---|---|---|---|---|---|")
+    for ahead, behind, name, date, state, subject in rows:
+        print(f"| {name} | {ahead} | {behind} | {date[:10]} | {state} | {one_line(subject)[:60].replace('|', '/')} |")
+    unmerged = [r for r in rows if r[4] == "unmerged"]
+    if unmerged:
+        top = unmerged[0]
+        biggest = max(unmerged, key=lambda r: r[0])
+        also = "" if biggest is top else (f" Largest divergence: {biggest[2]}, {biggest[0]} ahead "
+                                          f"(last commit {biggest[3][:10]}).")
+        print(f"\nLATEST WORK: {top[2]} is {top[0]} commit(s) ahead of {default} (last commit {top[3][:10]}). "
+              f"{len(unmerged)} unmerged branch(es).{also} The default branch may not hold the newest state: "
+              "audit the latest branch too, and report built-but-unmerged work as unmerged, not as missing.")
+    if git("rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+        notes.append("shallow clone: other branches may not be fetched and counts stop at the shallow boundary. "
+                     "Re-run with --fetch (or --remote to only list what the remote has).")
+    if args.remote or len(rows) == 0:
+        listed = git("ls-remote", "--heads", "origin")
+        if listed.returncode == 0:
+            remote = [line.split("refs/heads/", 1)[1] for line in listed.stdout.splitlines() if "refs/heads/" in line]
+            known = {short.split("/", 1)[1] for short, _, _ in refs.values() if short.startswith("origin/")}
+            missing = [b for b in remote if b not in known]
+            if missing:
+                notes.append(f"{len(missing)} branch(es) on the remote are NOT fetched locally: {', '.join(missing[:30])}"
+                             " - run `branches --fetch`.")
+        elif args.remote:
+            notes.append(f"could not list the remote: {one_line(listed.stderr)[:160]}")
+    for note in notes:
+        print(f"\nWARNING: {note}")
 
 
 # --------------------------------------------------------------------------- #
@@ -758,10 +953,10 @@ def build_parser():
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("criterion", help="add | verify | fail an acceptance criterion")
-    s.add_argument("action", choices=("add", "verify", "fail", "drop"))
+    s.add_argument("action", choices=("add", "verify", "fail", "drop", "unverifiable"))
     s.add_argument("items", nargs="+", help="one or more criterion texts (add) or ids (verify/fail)")
     s.add_argument("--evidence", help="command run + observed result")
-    s.add_argument("--reason", help="why the criterion is dropped from scope (drop)")
+    s.add_argument("--reason", help="drop: why it is out of scope; unverifiable: what is needed to check it")
     s.add_argument("--source", help="where the requirement came from, e.g. H3 (harvest prompt id) or brief.md")
     s.set_defaults(fn=cmd_criterion)
 
@@ -812,7 +1007,19 @@ def build_parser():
         s.add_argument("--transcripts", help="folder of session *.jsonl files (default: Claude Code history)")
         s.add_argument("--project", help="project path the sessions ran in (default: current directory)")
         s.add_argument("--max-chars", type=int, default=4000, help="truncate each prompt to this length")
+        s.add_argument("--extra", action="append", metavar="FILE.jsonl",
+                       help="sessions collected elsewhere (cloud, other machines); see references/audit.md")
         s.set_defaults(fn=fn)
+    s = sub.add_parser("events", help="audit: extract typed prompts from saved session-event dumps into --extra lines")
+    s.add_argument("files", nargs="+", help="files holding session events as JSON (wrapper text around it is fine)")
+    s.add_argument("--session", required=True, help="id of the session these events belong to")
+    s.add_argument("--out", required=True, help="JSONL file to append to; pass it to `harvest --extra`")
+    s.set_defaults(fn=cmd_events)
+    s = sub.add_parser("branches", help="audit: every branch vs the default branch (ahead/behind, merged?)")
+    s.add_argument("--project", help="repository path (default: current directory)")
+    s.add_argument("--fetch", action="store_true", help="fetch all remote branches first (updates remote-tracking refs only)")
+    s.add_argument("--remote", action="store_true", help="also list branches the remote has that are not fetched")
+    s.set_defaults(fn=cmd_branches)
     for name, fn, text in (
         ("status", cmd_status, "print MEMORY.md"),
         ("resume", cmd_resume, "print a resume brief after an interruption"),
@@ -830,6 +1037,10 @@ def main(argv=None):
     except CliError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return exc.code
+    except BrokenPipeError:  # the reader (head, grep -q) closed the pipe: not an error, and not a memory problem
+        with contextlib.suppress(OSError):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
     except OSError as exc:
         print(
             f"error: cannot write project memory in {state_dir()}/ ({exc.strerror or exc}). The shell is probably "

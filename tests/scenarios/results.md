@@ -214,3 +214,42 @@ safety classifier as transcript tampering. That block is correct, which is why b
 
 **CI:** `tests/e2e/audit/make_fixture.py` + a CI step checks harvest finds the buried requirement, excludes
 noise, and that the oracle confirms both gaps (18/20 on `--clarified`).
+
+## 11. v1.3: three gaps found by auditing a real project (ECCode)
+
+The audit mode was run on a real, unseen project: 20 branches, 22 cloud sessions, v0.16.0. It produced a
+correct, cited audit (3 criteria verified by running the code, 4 failed, 2 unverifiable), and exposed three
+gaps in the skill. All three are fixed test-first.
+
+| Gap | What happened on the real project | Fix |
+|---|---|---|
+| The skill never said to look at other branches | The default checkout was shallow and showed 1 branch; the real latest work was on an unmerged line 284 commits ahead. Found by judgment, not by the skill. | `branches` (ahead/behind, merged?, most recent unmerged branch; warns on shallow clones and lists unfetched remote branches; `--fetch`). SKILL.md §11 step 1. |
+| History reader only saw this machine | All 22 sessions were cloud sessions: `harvest` saw none. | `harvest --extra` merges session records and prompts collected elsewhere; `events` copies typed prompts exactly out of saved session dumps; coverage lists sessions whose prompts were not read and tallies final statuses. |
+| No "not yet proven" status | The project's central claim (beats a plain agent) is unmeasured; it had to be recorded as `failed`. | `criterion unverifiable --reason`: neither passed nor failed, reported separately, gate stays PARTIALLY COMPLETE. |
+
+**RED/GREEN on the branch trap** (`tests/e2e/audit/make_branch_fixture.py`: a shallow single-branch clone;
+`search`/`export` built with tests on an unfetched branch; `sync` needs a real server):
+
+| Skill | Runs | Result |
+|---|---|---|
+| v1.2 | 2 | **0/2.** Both reported search, export and sync as "MISSING, no code" and recommended implementing them. Neither looked beyond the local checkout. |
+| v1.3 | 2 | **2/2.** Both ran `branches`, fetched, reported "built but unmerged" with the branch name and commit count, and recorded sync as `unverifiable`. Verified from their recorded state, not only their reports. |
+
+Cost: v1.2 about 98k tokens and 7 tool calls per run; v1.3 about 104k and 9.
+
+**Real-data checks:**
+- `branches` on the full ECCode clone named `s4-add3/base` (284 ahead, 2026-11-09) as the latest work in one
+  command. A research subagent had needed about 200k tokens and 4 minutes for the same answer.
+  Bug found on the way and fixed: the first version picked the branch with the *most commits* (an October side
+  line, 441 ahead) instead of the *most recent* one.
+- Cloud path: a subagent recovered 3 typed prompts and 2 final claims from two real sessions in 6 calls.
+  `events` reproduced its lines exactly from the saved pages. Merged with 22 session records, `harvest`
+  reported "2 read, 20 known but not read; final status: blocked 14, completed 7, review_ready 1".
+- That tally corrected a hand count ("13 of 22 blocked") made earlier in the same audit. Counts are now printed
+  by the tool.
+
+**Other bugs found and fixed in this round (each with a regression test):** `token=...` was not redacted;
+piping any command into `grep -q` printed a false "cannot write project memory" error.
+
+**Limits:** reading cloud prompts is still expensive (events include every tool result), so the procedure reads
+session records for all sessions and prompts for selected ones, and says which were not read. n=2 per arm.

@@ -588,3 +588,266 @@ class TestHarvest(CliTestCase):
         self.assertEqual(state["criteria"]["AC1"]["source"], "H2")
         out = subprocess.run([sys.executable, str(CLI), "gate"], cwd=self.project, capture_output=True, text=True).stdout
         self.assertIn("[H2]", out)
+
+
+# --------------------------------------------------------------------------- #
+# v1.3: gaps found by the ECCode audit
+# --------------------------------------------------------------------------- #
+class TestUnverifiable(CliTestCase):
+    """'Not yet proven' is not 'failed': ECCode's central claim had to be recorded as failed."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+        self.run_cli("criterion", "add", "Core works", "Beats a bare agent on correctness")
+        self.run_cli("criterion", "verify", "AC1", "--evidence", "test_core OK")
+
+    def test_unverifiable_requires_reason(self):
+        proc = self.run_cli("criterion", "unverifiable", "AC2", expect=2)
+        self.assertIn("reason", proc.stderr.lower())
+
+    def test_unverifiable_is_neither_passed_nor_failed(self):
+        self.run_cli("criterion", "unverifiable", "AC2", "--reason", "needs paid model runs")
+        self.assertEqual(self.state()["criteria"]["AC2"]["status"], "unverifiable")
+        proc = self.run_cli("gate", expect=10)
+        self.assertIn("PARTIALLY COMPLETE", proc.stdout)
+        self.assertIn("could not be verified here", proc.stdout)
+        self.assertIn("needs paid model runs", proc.stdout)
+        self.assertNotIn("(failed)", proc.stdout)
+
+    def test_unverifiable_shown_in_status_and_resume(self):
+        self.run_cli("criterion", "unverifiable", "AC2", "--reason", "needs paid model runs")
+        self.assertIn("needs paid model runs", self.run_cli("status").stdout)
+        self.assertIn("AC2", self.run_cli("resume").stdout)
+
+
+def _git(cwd, *args, date=None):
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    if date:
+        env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+    subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", *args],
+                   cwd=cwd, check=True, capture_output=True, env=env)
+
+
+class TestBranches(CliTestCase):
+    """ECCode's default branch was 284 commits behind the real latest work, and the clone hid it."""
+
+    def setUp(self):
+        super().setUp()
+        work = self.dir / "work"
+        work.mkdir()
+        _git(work, "init", "-q")
+        (work / "a.txt").write_text("1\n")
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", "base")
+        _git(work, "branch", "old/merged")
+        (work / "a.txt").write_text("2\n")
+        _git(work, "commit", "-qam", "main moves on")
+        _git(work, "checkout", "-q", "-b", "feature/x")
+        for i in range(3):
+            (work / f"f{i}.txt").write_text("x\n")
+            _git(work, "add", "-A")
+            _git(work, "commit", "-q", "-m", f"feature step {i}")
+        _git(work, "checkout", "-q", "main")
+        self.origin = self.dir / "origin.git"
+        _git(self.dir, "clone", "-q", "--bare", str(work), str(self.origin))
+        self.full = self.dir / "full"
+        _git(self.dir, "clone", "-q", f"file://{self.origin}", str(self.full))
+        self.shallow = self.dir / "shallow"
+        _git(self.dir, "clone", "-q", "--depth", "1", f"file://{self.origin}", str(self.shallow))
+
+    def branches(self, cwd, *args, expect=0):
+        proc = subprocess.run([sys.executable, str(CLI), "branches", *args], cwd=cwd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, expect, proc.stderr)
+        return proc
+
+    def test_lists_ahead_behind_and_flags_most_advanced(self):
+        out = self.branches(self.full).stdout
+        self.assertIn("default branch: origin/main", out)
+        row = next(line for line in out.splitlines() if "feature/x" in line and "|" in line)
+        self.assertIn("| 3 |", row)          # ahead
+        self.assertIn("unmerged", row)
+        self.assertIn("LATEST WORK", out)
+        self.assertIn("feature/x is 3 commit(s) ahead", out)
+        merged = next(line for line in out.splitlines() if "old/merged" in line and "|" in line)
+        self.assertIn("merged", merged)
+        self.assertNotIn("unmerged", merged)
+
+    def test_shallow_clone_warns_and_lists_unfetched_branches_unasked(self):
+        # With no other branch known locally, the remote is consulted automatically: this is the trap.
+        out = self.branches(self.shallow).stdout
+        self.assertIn("shallow", out.lower())
+        self.assertIn("NOT fetched", out)
+        self.assertIn("feature/x", out)
+        self.assertNotIn("LATEST WORK", out)  # nothing can be compared until it is fetched
+
+    def test_remote_flag_lists_unfetched_branches_in_a_partial_clone(self):
+        _git(self.shallow, "fetch", "-q", "origin", "+refs/heads/old/merged:refs/remotes/origin/old/merged")
+        self.assertNotIn("feature/x", self.branches(self.shallow).stdout)
+        self.assertIn("feature/x", self.branches(self.shallow, "--remote").stdout)
+
+    def test_fetch_makes_hidden_branches_visible(self):
+        out = self.branches(self.shallow, "--fetch").stdout
+        self.assertIn("feature/x is 3 commit(s) ahead", out)
+
+    def test_latest_work_is_the_most_recent_unmerged_branch_not_the_longest(self):
+        # ECCode: an October side line was 441 commits ahead; the real latest work (November) was 284 ahead.
+        repo = self.dir / "dated"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        (repo / "a.txt").write_text("1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base", date="2026-01-01T10:00:00")
+        _git(repo, "checkout", "-q", "-b", "old/long")
+        for i in range(5):
+            (repo / f"o{i}.txt").write_text("x\n")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-q", "-m", f"old {i}", date="2026-02-01T10:00:00")
+        _git(repo, "checkout", "-q", "main")
+        _git(repo, "checkout", "-q", "-b", "new/short")
+        (repo / "n.txt").write_text("x\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "new work", date="2026-06-01T10:00:00")
+        _git(repo, "checkout", "-q", "main")
+        out = self.branches(repo).stdout
+        latest = next(line for line in out.splitlines() if line.startswith("LATEST WORK"))
+        self.assertIn("new/short", latest)
+        self.assertIn("2026-06-01", latest)
+        rows = [line for line in out.splitlines() if line.startswith("| ") and "/" in line]
+        self.assertLess(rows.index(next(r for r in rows if "new/short" in r)),
+                        rows.index(next(r for r in rows if "old/long" in r)))
+        self.assertIn("old/long", out[out.index("LATEST WORK"):])  # the bigger, older line is still mentioned
+
+    def test_not_a_git_repository_is_a_clean_error(self):
+        plain = self.dir / "plain"
+        plain.mkdir()
+        proc = self.branches(plain, expect=1)
+        self.assertIn("not a git repository", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+
+class TestHarvestExtra(CliTestCase):
+    """ECCode's 22 sessions lived in the cloud: harvest saw none of them."""
+
+    def setUp(self):
+        super().setUp()
+        self.project = self.dir / "proj"
+        self.project.mkdir()
+        self.extra = self.dir / "cloud.jsonl"
+        lines = [
+            {"kind": "session", "id": "session_A", "title": "Toolkit build", "start": "2026-10-07T20:35:00Z",
+             "end": "2026-10-08T10:05:00Z", "status": "blocked", "note": "needs API key token=abc123SECRETabc"},
+            {"kind": "session", "id": "session_B", "title": "Stage 1 freeze", "start": "2026-11-09T18:59:00Z",
+             "end": "2026-11-09T19:55:00Z", "status": "completed", "note": "Q-1..Q-5 await answers"},
+            {"kind": "prompt", "session": "session_B", "timestamp": "2026-11-09T19:00:00Z",
+             "text": "Freeze the base. Do not push without asking."},
+            {"kind": "claim", "session": "session_B", "text": "Base frozen at fd344d5."},
+        ]
+        self.extra.write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+
+    def harvest(self, *args, expect=0):
+        proc = subprocess.run(
+            [sys.executable, str(CLI), "harvest", "--transcripts", str(self.dir / "none"), *args],
+            cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, expect, proc.stderr)
+        return proc
+
+    def test_extra_sessions_are_merged_numbered_and_redacted(self):
+        self.harvest("--extra", str(self.extra))
+        text = (self.project / ".supervisor" / "harvest.md").read_text()
+        self.assertIn("### H1", text)
+        self.assertIn("Do not push without asking", text)
+        self.assertIn("Base frozen at fd344d5", text)
+        self.assertNotIn("abc123SECRETabc", text)
+
+    def test_sessions_without_prompts_are_listed_as_not_covered(self):
+        self.harvest("--extra", str(self.extra))
+        text = (self.project / ".supervisor" / "harvest.md").read_text()
+        self.assertIn("prompts NOT read", text)
+        section = text[text.index("prompts NOT read"):]
+        self.assertIn("session_A", section)
+        self.assertIn("Toolkit build", section)
+        self.assertIn("blocked", section)
+        self.assertIn("1 known session(s) whose prompts were not read", text)
+        self.assertIn("1 unreadable line", text)
+
+    def test_coverage_counts_sessions_by_final_status(self):
+        # A hand count of "sessions waiting on the user" was wrong in a real audit (13 said, 14 true).
+        self.harvest("--extra", str(self.extra))
+        text = (self.project / ".supervisor" / "harvest.md").read_text()
+        self.assertIn("Final status of the 2 known session(s): blocked 1, completed 1", text)
+
+    def test_without_extra_and_without_local_history_still_exits_5(self):
+        self.harvest(expect=5)
+
+
+class TestEventsImport(CliTestCase):
+    """A subagent had to retype long prompts from cloud session events; a parser copies them exactly."""
+
+    def setUp(self):
+        super().setUp()
+        def ev(ts, role, content, **extra):
+            return {"created_at": ts, role: {"uuid": ts, "internal_anthropic_catchall": {
+                "message": {"role": role, "content": content}, **extra}}}
+        page = {"ccr": {"data": [
+            ev("2026-11-09T20:03:05Z", "user", "MASTER PROMPT: write addendum 3.\nDo not push.", client_platform="desktop_app"),
+            ev("2026-11-09T20:04:00Z", "assistant", [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]),
+            ev("2026-11-09T20:04:01Z", "user", [{"type": "tool_result", "content": "NOISE output"}], tool_use_result={"stdout": "NOISE"}),
+            ev("2026-11-09T20:05:00Z", "user", "<task-notification>\nagent finished</task-notification>"),
+            ev("2026-11-09T20:12:24Z", "user", "I authorize the push", client_platform="android"),
+            ev("2026-11-09T20:12:37Z", "assistant", [{"type": "text", "text": "Pushed: origin/s4-add3/base is at 475b532."}]),
+        ]}}
+        self.page = self.dir / "page1.txt"
+        self.page.write_text('<other-session nonce="x">\nwrapper text\n' + json.dumps(page) + "\n</other-session>")
+        self.page2 = self.dir / "page2.txt"   # overlapping page: same first prompt again
+        self.page2.write_text(json.dumps({"ccr": {"data": page["ccr"]["data"][:1]}}))
+        self.out = self.dir / "cloud.jsonl"
+
+    def test_extracts_typed_prompts_exactly_and_last_claim(self):
+        self.run_cli("events", str(self.page), str(self.page2), "--session", "session_X", "--out", str(self.out))
+        recs = [json.loads(line) for line in self.out.read_text().splitlines()]
+        prompts = [r for r in recs if r["kind"] == "prompt"]
+        self.assertEqual([p["text"] for p in prompts],
+                         ["MASTER PROMPT: write addendum 3.\nDo not push.", "I authorize the push"])
+        self.assertEqual(prompts[0]["timestamp"], "2026-11-09T20:03:05Z")
+        self.assertTrue(all(r["session"] == "session_X" for r in recs))
+        claims = [r for r in recs if r["kind"] == "claim"]
+        self.assertEqual(len(claims), 1)
+        self.assertIn("475b532", claims[0]["text"])
+        self.assertNotIn("NOISE", self.out.read_text())
+        self.assertNotIn("task-notification", self.out.read_text())
+
+    def test_output_feeds_harvest_extra(self):
+        self.run_cli("events", str(self.page), "--session", "session_X", "--out", str(self.out))
+        proj = self.dir / "proj"
+        proj.mkdir()
+        proc = subprocess.run([sys.executable, str(CLI), "harvest", "--transcripts", str(self.dir / "none"),
+                               "--extra", str(self.out)], cwd=proj, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = (proj / ".supervisor" / "harvest.md").read_text()
+        self.assertIn("### H2", text)
+        self.assertIn("I authorize the push", text)
+
+    def test_file_without_events_is_a_clean_error(self):
+        bad = self.dir / "bad.txt"
+        bad.write_text("no json here")
+        proc = self.run_cli("events", str(bad), "--session", "s", "--out", str(self.out), expect=1)
+        self.assertIn("no session events", proc.stderr)
+
+
+class TestClosedPipe(CliTestCase):
+    """`supervisor.py branches | grep -q ...` printed a false "cannot write project memory" error."""
+
+    def test_reader_closing_the_pipe_early_is_not_reported_as_a_memory_error(self):
+        self.init()
+        for i in range(30):
+            self.run_cli("log", f"milestone {i}")
+        proc = subprocess.Popen([sys.executable, str(CLI), "status"], cwd=self.dir, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        proc.stdout.close()                       # the reader goes away before anything is written
+        err = proc.stderr.read().decode()
+        proc.stderr.close()
+        self.assertEqual(proc.wait(), 0, err)
+        self.assertNotIn("cannot write project memory", err)
+        self.assertNotIn("Traceback", err)

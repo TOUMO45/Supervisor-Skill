@@ -34,3 +34,10 @@ jobs:
           grep -q "CSVMD_MAX_WIDTH" .supervisor/harvest.md
           ! grep -q "test_core ... ok" .supervisor/harvest.md
           ! python -I "$GITHUB_WORKSPACE/tests/e2e/hidden_acceptance.py" . --clarified
+      - name: Audit mode, branch trap (latest work on an unfetched branch must be found)
+        run: |
+          python tests/e2e/audit/make_branch_fixture.py /tmp/bf >/dev/null
+          cd /tmp/bf/project
+          SUP="python $GITHUB_WORKSPACE/skills/autonomous-supervisor/scripts/supervisor.py"
+          $SUP branches | grep -q "NOT fetched locally: feature/search-export"
+          $SUP branches --fetch | grep -q "LATEST WORK: feature/search-export is 4 commit(s) ahead"
