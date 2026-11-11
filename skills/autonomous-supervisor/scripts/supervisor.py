@@ -810,7 +810,7 @@ def cmd_harvest(args, directory):
 
 def _json_values(raw):
     """Every top-level JSON value in a text that may wrap them in other content (host-saved tool results)."""
-    decoder, pos = json.JSONDecoder(), 0
+    decoder, pos = json.JSONDecoder(strict=False), 0  # real dumps carry raw newlines in strings
     while True:
         starts = [i for i in (raw.find("{", pos), raw.find("[", pos)) if i >= 0]
         if not starts:

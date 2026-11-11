@@ -829,6 +829,17 @@ class TestEventsImport(CliTestCase):
         self.assertIn("### H2", text)
         self.assertIn("I authorize the push", text)
 
+    def test_raw_newlines_inside_strings_are_tolerated(self):
+        # A real cloud page had unescaped line breaks inside message text; strict JSON rejects that.
+        raw = '{"ccr":{"data":[{"created_at":"2026-10-07T22:50:00Z","user":{"message":{"role":"user","content":"line one\nline two"}}}]}}'
+        raw = raw.replace("\\n", "\n")          # make the newline a raw control character
+        self.assertIn("\n", raw)
+        page = self.dir / "rawnl.txt"
+        page.write_text(raw)
+        self.run_cli("events", str(page), "--session", "session_Y", "--out", str(self.out))
+        rec = json.loads(self.out.read_text().splitlines()[0])
+        self.assertEqual(rec["text"], "line one\nline two")
+
     def test_file_without_events_is_a_clean_error(self):
         bad = self.dir / "bad.txt"
         bad.write_text("no json here")
