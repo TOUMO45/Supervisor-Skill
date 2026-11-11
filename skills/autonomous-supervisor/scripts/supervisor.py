@@ -11,6 +11,7 @@ Exit codes
   2   evidence missing (verification claims require --evidence)
   3   guard tripped (dependency, parallel limit, file overlap, retry limit)
   4   memory directory not writable (sandbox / read-only filesystem) - use the manual fallback
+  5   harvest/sessions: no session transcripts found for this project
   10  gate: PARTIALLY COMPLETE
   20  gate: BLOCKED
 
@@ -23,6 +24,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -37,7 +39,7 @@ TASK_STATES = ("pending", "running", "blocked", "done", "verified", "dropped")
 DEFAULT_MAX_STRATEGIES = 3
 SELF_OWNERS = {"self", "supervisor", "lead"}  # owners that are not delegated agents
 OPEN_TASK_STATES = ("pending", "running", "blocked", "done")
-EXIT_USAGE, EXIT_EVIDENCE, EXIT_GUARD, EXIT_UNWRITABLE, EXIT_PARTIAL, EXIT_BLOCKED = 1, 2, 3, 4, 10, 20
+EXIT_USAGE, EXIT_EVIDENCE, EXIT_GUARD, EXIT_UNWRITABLE, EXIT_NO_SOURCES, EXIT_PARTIAL, EXIT_BLOCKED = 1, 2, 3, 4, 5, 10, 20
 
 
 class CliError(Exception):
@@ -169,7 +171,8 @@ def render(state):
     for cid, c in state["criteria"].items():
         ev = f" - evidence: {c['evidence']}" if c.get("evidence") else ""
         ev += f" - reason: {c['reason']}" if c.get("reason") else ""
-        out.append(f"- **{cid}** {c['text']} - `{c['status']}`{ev}")
+        src = f" [{c['source']}]" if c.get("source") else ""
+        out.append(f"- **{cid}**{src} {c['text']} - `{c['status']}`{ev}")
     if not state["criteria"]:
         out.append("- _none yet_")
     out += ["", "## Tasks"]
@@ -299,6 +302,8 @@ def cmd_criterion(args, directory):
             for text in args.items:
                 cid = next_id(state, "AC", "criteria")
                 state["criteria"][cid] = {"text": one_line(text), "status": "pending"}
+                if args.source:
+                    state["criteria"][cid]["source"] = one_line(args.source)
                 msgs.append(f"{cid} added")
         else:
             targets = [get(state, "criteria", item) for item in args.items]  # validate all first
@@ -527,7 +532,8 @@ def cmd_gate(args, directory):
     problems = []
     if not criteria:
         problems.append("no acceptance criteria defined - completion cannot be judged")
-    problems += [f"{c} not verified ({criteria[c]['status']}): {criteria[c]['text']}" for c in unverified_criteria]
+    tag = lambda c: f" [{criteria[c]['source']}]" if criteria[c].get("source") else ""  # noqa: E731
+    problems += [f"{c}{tag(c)} not verified ({criteria[c]['status']}): {criteria[c]['text']}" for c in unverified_criteria]
     problems += [f"{t} is `{tasks[t]['status']}`, not verified: {tasks[t]['title']}" for t in open_tasks]
     # Recorded next actions mean work is still planned. Either it is out-of-scope
     # follow-up (then `next --clear`) or the criteria don't cover the full scope.
@@ -550,10 +556,191 @@ def cmd_gate(args, directory):
     print(f"VERIFIED COMPLETE ({len(criteria)} criteria - this verdict covers exactly these; "
           "confirm they span the whole agreed scope)")
     for c, x in criteria.items():
-        print(f"- {c} {x['text']}: {x['evidence']}")
+        src = f" [{x['source']}]" if x.get("source") else ""
+        print(f"- {c}{src} {x['text']}: {x['evidence']}")
     for c, x in dropped.items():
         print(f"- excluded {c} {x['text']}: {x['reason']}")
     print(f"Effort: {metrics(state)}")
+
+
+# --------------------------------------------------------------------------- #
+# Audit mode: reconstruct requirements from past Claude Code sessions
+# --------------------------------------------------------------------------- #
+SECRET_PATTERNS = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"), "private-key"),
+    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}"), "anthropic-key"),
+    (re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}"), "api-key"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "github-token"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "github-token"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "aws-key"),
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "slack-token"),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}"), "bearer-token"),
+    (re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token)\b(\s*[:=]\s*)\S+"), "credential"),
+]
+NOISE_PREFIXES = ("<task-notification", "<system-reminder", "Stop hook feedback", "Caveat:", "<local-command",
+                  "[Request interrupted", "<command-stdout", "Base directory for this skill")
+SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+
+
+def redact(text):
+    for pattern, label in SECRET_PATTERNS:
+        if label == "credential":
+            text = pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED {label}]", text)
+        else:
+            text = pattern.sub(f"[REDACTED {label}]", text)
+    return text
+
+
+def encode_project(path):
+    return "".join(c if c.isalnum() else "-" for c in str(path))
+
+
+def _first_cwd(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for _, line in zip(range(50), handle):
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                if cwd:
+                    return cwd
+    except OSError:
+        return None
+    return None
+
+
+def find_transcripts(project, explicit=None):
+    """Top-level *.jsonl session files for this project (subagent transcripts live in subfolders)."""
+    if explicit:
+        folder = Path(explicit).expanduser()
+        return sorted(folder.glob("*.jsonl")) if folder.is_dir() else [], [str(folder)]
+    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    found = {}
+    direct = base / encode_project(project)
+    for f in direct.glob("*.jsonl") if direct.is_dir() else []:
+        found[f.resolve()] = f
+    if base.is_dir():  # folder naming differs across versions/platforms: also match on the recorded cwd
+        for f in base.glob("*/*.jsonl"):
+            if f.resolve() not in found and _first_cwd(f) == str(project):
+                found[f.resolve()] = f
+    return sorted(found.values()), [str(base)]
+
+
+def _text_of(content):
+    if isinstance(content, str):
+        return content, False
+    parts, has_tool_result = [], False
+    for block in content or []:
+        kind = block.get("type") if isinstance(block, dict) else None
+        if kind == "text":
+            parts.append(block.get("text", ""))
+        elif kind == "image":
+            parts.append("[image attached]")
+        elif kind == "tool_result":
+            has_tool_result = True
+    return "\n".join(p for p in parts if p), has_tool_result
+
+
+def _is_human(rec, text):
+    if rec.get("toolUseResult") is not None or rec.get("isMeta") or rec.get("isSidechain"):
+        return False
+    origin = rec.get("origin")
+    if isinstance(origin, dict) and origin.get("kind"):
+        return origin["kind"] == "human"
+    return not text.lstrip().startswith(NOISE_PREFIXES)  # older transcripts carry no origin field
+
+
+def parse_session(path):
+    session = {"id": path.stem, "start": None, "end": None, "prompts": [], "claim": None, "skipped": 0}
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                session["skipped"] += 1
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in ("user", "assistant"):
+                continue
+            ts = rec.get("timestamp") or ""
+            if ts:
+                session["start"] = min(filter(None, [session["start"], ts]))
+                session["end"] = max(filter(None, [session["end"], ts]))
+            text, has_tool_result = _text_of((rec.get("message") or {}).get("content"))
+            if rec["type"] == "assistant":
+                if text.strip() and not rec.get("isSidechain"):
+                    session["claim"] = text.strip()
+                continue
+            text = SYSTEM_REMINDER.sub("", text).strip()
+            if text and not has_tool_result and _is_human(rec, text):
+                session["prompts"].append((ts, text))
+    return session
+
+
+def _clip(text, limit):
+    text = redact(text)
+    return text if len(text) <= limit else text[:limit] + f"\n…[truncated {len(text) - limit} chars]"
+
+
+def load_sessions(args):
+    project = Path(args.project or Path.cwd()).resolve()
+    files, searched = find_transcripts(project, args.transcripts)
+    sessions = [parse_session(f) for f in files]
+    sessions = [s for s in sessions if s["prompts"] or s["claim"]]
+    sessions.sort(key=lambda s: s["start"] or "")
+    if not sessions:
+        raise CliError(
+            f"no session transcripts found for {project} (searched: {', '.join(searched)}). Audit coverage is limited "
+            "to the repository itself; ask the user for exported chats or other requirement sources, or pass "
+            "--transcripts DIR.", EXIT_NO_SOURCES)
+    return project, sessions, searched
+
+
+def cmd_sessions(args, directory):
+    _, sessions, _ = load_sessions(args)
+    for s in sessions:
+        first = one_line(redact(s["prompts"][0][1]))[:90] if s["prompts"] else "(no human prompt)"
+        print(f"{s['id']}  {(s['start'] or '?')[:16]} -> {(s['end'] or '?')[:16]}  "
+              f"prompts: {len(s['prompts'])}  first: \"{first}\"")
+
+
+def cmd_harvest(args, directory):
+    project, sessions, searched = load_sessions(args)
+    total = sum(len(s["prompts"]) for s in sessions)
+    out = [
+        "# Requirement harvest",
+        "",
+        f"_Generated {now()} by `supervisor.py harvest` from {len(sessions)} session(s) and {total} human prompt(s) "
+        f"for `{project}`. Secrets are redacted; this file is git-ignored._",
+        "",
+        "> **How to use:** every prompt below may carry requirements. Record each one with "
+        "`criterion add \"...\" --source H#`. A later prompt can change an earlier one - record that with `decide`. "
+        "Final claims are leads, not evidence: verify every criterion against the code as it is now.",
+        "",
+        "## Coverage",
+        f"- Searched: {', '.join(searched)}",
+        f"- Sessions read: {len(sessions)}; human prompts: {total}; unreadable lines skipped: "
+        f"{sum(s['skipped'] for s in sessions)}",
+        "- **Not covered:** chats outside this machine's Claude Code history (claude.ai, other computers, cloud "
+        "sessions), issue trackers, and anything said outside a chat. Ask for them or say the audit excludes them.",
+    ]
+    n = 0
+    for i, s in enumerate(sessions, 1):
+        out += ["", f"## Session {i} - `{s['id']}` ({(s['start'] or '?')[:16]} -> {(s['end'] or '?')[:16]})"]
+        for ts, text in s["prompts"]:
+            n += 1
+            quoted = "\n".join("> " + line if line else ">" for line in _clip(text, args.max_chars).splitlines())
+            out += ["", f"### H{n} - {ts[:16]}", quoted]
+        if s["claim"]:
+            claim = "\n".join("> " + line if line else ">" for line in _clip(s["claim"], 1500).splitlines())
+            out += ["", f"**Final claim at end of session {i}** (a lead, not evidence):", claim]
+    directory.mkdir(parents=True, exist_ok=True)
+    atomic_write(directory / "harvest.md", "\n".join(out) + "\n")
+    ignore = directory / ".gitignore"
+    existing = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+    if "harvest.md" not in existing.split():
+        atomic_write(ignore, existing + ("" if not existing or existing.endswith("\n") else "\n") + "harvest.md\n")
+    print(f"harvested {total} human prompt(s) from {len(sessions)} session(s) -> {directory}/harvest.md")
 
 
 # --------------------------------------------------------------------------- #
@@ -575,6 +762,7 @@ def build_parser():
     s.add_argument("items", nargs="+", help="one or more criterion texts (add) or ids (verify/fail)")
     s.add_argument("--evidence", help="command run + observed result")
     s.add_argument("--reason", help="why the criterion is dropped from scope (drop)")
+    s.add_argument("--source", help="where the requirement came from, e.g. H3 (harvest prompt id) or brief.md")
     s.set_defaults(fn=cmd_criterion)
 
     task = sub.add_parser("task", help="manage tasks").add_subparsers(dest="task_cmd", required=True)
@@ -616,6 +804,15 @@ def build_parser():
     s = sub.add_parser("log", help="append a milestone note")
     s.add_argument("text")
     s.set_defaults(fn=cmd_log)
+    for name, fn, text in (
+        ("sessions", cmd_sessions, "list past Claude Code sessions for this project (audit mode)"),
+        ("harvest", cmd_harvest, "extract every human prompt + final claims from past sessions into harvest.md"),
+    ):
+        s = sub.add_parser(name, help=text)
+        s.add_argument("--transcripts", help="folder of session *.jsonl files (default: Claude Code history)")
+        s.add_argument("--project", help="project path the sessions ran in (default: current directory)")
+        s.add_argument("--max-chars", type=int, default=4000, help="truncate each prompt to this length")
+        s.set_defaults(fn=fn)
     for name, fn, text in (
         ("status", cmd_status, "print MEMORY.md"),
         ("resume", cmd_resume, "print a resume brief after an interruption"),

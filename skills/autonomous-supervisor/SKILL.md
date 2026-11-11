@@ -1,6 +1,6 @@
 ---
 name: autonomous-supervisor
-description: Use when the user hands over a project to deliver, build, or finish from a brief, spec, PRD, idea, or master prompt ("here's the brief", "build me...", "deliver this", "finish this project") - especially when the work spans several steps, sessions, or agents, must survive a handoff or interruption, or gets requirements added mid-conversation. Also use when continuing or resuming an interrupted project or a repo with a .supervisor/ directory, and when asked whether a project is really done or ready to ship. Not for single edits, typos, or quick questions.
+description: Use when the user hands over a project to deliver, build, or finish from a brief, spec, PRD, idea, or master prompt ("here's the brief", "build me...", "deliver this", "finish this project") - especially when the work spans several steps, sessions, or agents, must survive a handoff or interruption, or gets requirements added mid-conversation. Also use when continuing or resuming an interrupted project or a repo with a .supervisor/ directory, and when asked to audit an old or interrupted project against everything that was asked, or whether it is really done or ready to ship. Not for single edits, typos, or quick questions.
 ---
 
 # Autonomous Supervisor
@@ -23,7 +23,7 @@ Each tool call costs more than the CLI work inside it. Chain updates with `&&`. 
 | **Lite** | One session, a handful of mostly sequential tasks | `init`, criteria, `gate`. Do the work yourself. |
 | **Full** | Several milestones, substantial independent tracks, or likely to outlive one context window | Everything below. |
 
-If `.supervisor/state.json` exists, you are **resuming**: run `$SUP resume` first (§7).
+If `.supervisor/state.json` exists, you are **resuming**: run `$SUP resume` first (§7). If the user asks whether past work is complete, or the project predates this skill, **audit** it first (§11).
 
 ## 2. Define success before planning
 
@@ -44,7 +44,7 @@ $SUP task add "CLI flags" --depends T1 --criteria AC3 --files "csvmd/__main__.py
 $SUP ready      # pending tasks whose dependencies are verified
 ```
 
-Do the critical path first, with the simplest design that meets the criteria. Replan on evidence, but keep the objective.
+Critical path first; simplest design that meets the criteria.
 
 ## 4. Delegate, or do it yourself
 
@@ -74,7 +74,7 @@ $SUP criterion verify AC1 --evidence "test_pipe_escaped OK; echo 'a|b' | python3
 
 Evidence is specific to *that* criterion: the test name or command, plus what you observed. A suite total like "29 tests OK" isn't evidence for a single criterion.
 
-`verified` fingerprints the task's owned files. If they change later, `resume` and `gate` flag the task for re-verification. So re-run a passing check only when it's flagged or something it covers changed. Run targeted checks while building and the full suite at each integration point.
+`verified` fingerprints the task's owned files; later edits get flagged for re-verification by `resume` and `gate`. Re-run a passing check only when flagged. Run targeted checks while building, the full suite at integration points.
 
 ## 6. Failures: bounded retries, then change strategy
 
@@ -90,15 +90,7 @@ The triage playbook is in `references/recovery.md`.
 
 Update memory at milestones, before handoffs, and when context runs low. Keep `$SUP next "..."` current. `MEMORY.md` is re-rendered on every write.
 
-After an interruption, run `$SUP resume` and act in this order:
-1. **Verified and unchanged**: don't redo.
-2. **Changed since verification**: re-verify.
-3. **In flight**: collect the report, or check the agent's files and age before re-dispatching.
-4. **Done**: verify.
-5. **Blocked**: recheck.
-6. **Ready**: start.
-
-Recorded decisions are binding. Reversing one takes a new `decide` with the reason.
+After an interruption, run `$SUP resume` and act in its order: don't redo *verified and unchanged*; re-verify *changed*; for *in flight*, collect the report or check the agent's files first; verify *done*; recheck *blocked*; start *ready*. Recorded decisions are binding; reversing one takes a new `decide`.
 
 ## 8. Budget and stopping rules
 
@@ -110,11 +102,11 @@ Recorded decisions are binding. Reversing one takes a new `decide` with the reas
 | Delegation depth | 1 | Supervisor splits the task |
 | Scope | Agreed criteria | Stop when the gate passes. Optional ideas go to the user. |
 
-`status` and `gate` report effort (dispatches, failed attempts, strategy changes). Optimize for the total cost of a correct result, including rework.
+Optimize for the total cost of a correct result, including rework.
 
 ## 9. Escalate rarely, precisely
 
-Escalate only when you need a decision that changes the outcome, missing access, a scope change, or explicit authorization. Follow `templates/escalation.md`: what blocks you, what you tried, the **smallest** decision needed, and what continues meanwhile. Mark the task `blocked --note "..."` and keep working on everything else. Never ask the user to say "continue", to relay messages between agents, or to repeat anything memory holds.
+Escalate only for a decision that changes the outcome, missing access, a scope change, or explicit authorization, using `templates/escalation.md` (blocker, what you tried, the **smallest** decision needed). Mark the task `blocked --note "..."` and continue everything else. Never ask the user to say "continue", relay messages, or repeat what memory holds.
 
 ## 10. Finish honestly
 
@@ -125,6 +117,17 @@ $SUP gate           # 0 VERIFIED COMPLETE | 10 PARTIALLY COMPLETE | 20 BLOCKED
 ```
 
 Report the gate's verdict verbatim using `templates/final-delivery.md`. **Never call the work complete when the gate disagrees.** For consequential integrations, also fill in `templates/verification-report.md`.
+
+## 11. Audit an existing project
+
+What was *asked* lives in past conversations, not in the code. Users rarely know where that history is, and it can be megabytes long.
+
+1. `$SUP harvest` finds this project's past Claude Code sessions itself (even if the folder moved) and writes every human prompt (H1…Hn) plus each session's final claim to `.supervisor/harvest.md`, secrets redacted, git-ignored. Exit `5` = no history: ask for other sources.
+2. Read every prompt, plus the brief and docs. For each requirement, run `$SUP criterion add "..." --source H#`. When a later prompt overrides an earlier one, record it with `decide`.
+3. Verify each criterion against the code **as it is now**. Old "done" claims and passing tests are leads, not evidence.
+4. Run `gate`, then report with `templates/audit-report.md`, including **coverage**: which sessions and sources were read, and which weren't. Never say "100% complete" while a source is uncovered.
+
+Details: `references/audit.md`.
 
 ## Host adaptation
 
@@ -141,9 +144,6 @@ Details: `references/host-adaptation.md`.
 - You claim "tests pass" without your own output.
 - A fourth variation of the same fix.
 - Redoing work that `resume` lists as verified and unchanged.
-- A roadmap or subagents for a Direct-mode task.
 - Fanning out to subagents for tracks of a few tool calls each.
 - Saying "complete" while `gate` exits non-zero.
-- Two running agents with overlapping files.
-- A feature that maps to no criterion.
 - A user requirement that exists only in chat.

@@ -437,3 +437,154 @@ class TestUnwritableMemory(CliTestCase):
             capture_output=True, text=True, env={**os.environ, "SUPERVISOR_DIR": str(blocker / "sub")},
         )
         self.assertIn("MANUAL.md", proc.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# v1.2 audit mode: reconstruct requirements from past Claude Code sessions
+# --------------------------------------------------------------------------- #
+def _rec(kind, ts, session, cwd, content, **extra):
+    """One transcript record shaped like Claude Code's ~/.claude/projects/*.jsonl."""
+    rec = {"type": kind, "timestamp": ts, "sessionId": session, "cwd": cwd,
+           "isSidechain": False, "uuid": f"{session}-{ts}"}
+    if kind == "user":
+        rec["message"] = {"role": "user", "content": content}
+        rec.update(extra)
+    else:
+        rec["message"] = {"role": "assistant", "content": content}
+    return json.dumps(rec)
+
+
+def human(ts, session, cwd, text):
+    return _rec("user", ts, session, cwd, text, origin={"kind": "human"}, promptSource="sdk")
+
+
+def write_session(path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(records) + "\n")
+
+
+class TestHarvest(CliTestCase):
+    def setUp(self):
+        super().setUp()
+        self.project = self.dir / "proj"
+        self.project.mkdir()
+        self.config = self.dir / "claude-config"
+        cwd = str(self.project.resolve())
+        encoded = "".join(c if c.isalnum() else "-" for c in cwd)
+        self.tdir = self.config / "projects" / encoded
+        a, b = "aaaa-1111", "bbbb-2222"
+        write_session(self.tdir / f"{a}.jsonl", [
+            human("2026-01-01T10:00:00Z", a, cwd, "Build csvmd per brief.md. Stdlib only."),
+            _rec("assistant", "2026-01-01T10:00:05Z", a, cwd,
+                 [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]),
+            _rec("user", "2026-01-01T10:00:06Z", a, cwd,
+                 [{"type": "tool_result", "content": "NOISE tool output that is not a requirement"}],
+                 toolUseResult={"stdout": "x"}),
+            _rec("user", "2026-01-01T10:00:07Z", a, cwd, "Base directory for this skill: /x", isMeta=True),
+            _rec("user", "2026-01-01T10:00:08Z", a, cwd,
+                 "<task-notification>\n<task-id>t1</task-id>\nagent finished</task-notification>",
+                 origin={"kind": "task-notification"}),
+            human("2026-01-01T10:05:00Z", a, cwd,
+                  "Also: a missing input file must exit with code 3. My key is sk-ant-api03-AbCdEf1234567890XyZ_abcdef"),
+            _rec("assistant", "2026-01-01T10:09:00Z", a, cwd,
+                 [{"type": "text", "text": "Core done. CLI deferred to next session."}]),
+        ])
+        write_session(self.tdir / f"{b}.jsonl", [
+            human("2026-01-02T09:00:00Z", b, cwd,
+                  [{"type": "image", "source": {}}, {"type": "text", "text": "Continue the project and finish it."}]),
+            _rec("assistant", "2026-01-02T09:30:00Z", b, cwd,
+                 [{"type": "text", "text": "csvmd is finished, all tests pass."}]),
+        ])
+        # a subagent transcript must be ignored
+        write_session(self.tdir / a / "subagents" / "agent-x.jsonl", [
+            human("2026-01-01T10:01:00Z", a, cwd, "SUBAGENT BRIEF should not appear"),
+        ])
+
+    def harvest(self, *args, expect=0):
+        return subprocess.run(
+            [sys.executable, str(CLI), "harvest", *args], cwd=self.project, capture_output=True, text=True,
+            env={**os.environ, "CLAUDE_CONFIG_DIR": str(self.config)},
+        ), expect
+
+    def run_harvest(self, *args, expect=0):
+        proc, _ = self.harvest(*args)
+        self.assertEqual(proc.returncode, expect, proc.stderr)
+        return proc
+
+    def test_harvest_extracts_only_human_prompts_in_order(self):
+        self.run_harvest()
+        text = (self.project / ".supervisor" / "harvest.md").read_text()
+        self.assertIn("H1", text)
+        self.assertIn("Build csvmd per brief.md", text)
+        self.assertIn("missing input file must exit with code 3", text)
+        self.assertIn("Continue the project and finish it.", text)
+        self.assertLess(text.index("Build csvmd"), text.index("exit with code 3"))
+        self.assertLess(text.index("exit with code 3"), text.index("Continue the project"))
+        for noise in ("NOISE tool output", "Base directory for this skill", "task-notification", "SUBAGENT BRIEF"):
+            self.assertNotIn(noise, text)
+
+    def test_harvest_records_final_claim_per_session_and_coverage(self):
+        self.run_harvest()
+        text = (self.project / ".supervisor" / "harvest.md").read_text()
+        self.assertIn("csvmd is finished, all tests pass.", text)
+        self.assertIn("2 session", text)
+        self.assertIn("3 human prompt", text)
+
+    def test_harvest_redacts_secrets_and_keeps_digest_out_of_git(self):
+        self.run_harvest()
+        text = (self.project / ".supervisor" / "harvest.md").read_text()
+        self.assertNotIn("sk-ant-api03-AbCdEf1234567890XyZ_abcdef", text)
+        self.assertIn("[REDACTED", text)
+        self.assertIn("harvest.md", (self.project / ".supervisor" / ".gitignore").read_text())
+
+    def test_harvest_finds_sessions_by_cwd_when_folder_name_differs(self):
+        renamed = self.config / "projects" / "some-other-name"
+        self.tdir.rename(renamed)
+        self.run_harvest()
+        self.assertIn("Build csvmd", (self.project / ".supervisor" / "harvest.md").read_text())
+
+    def test_harvest_explicit_transcripts_dir(self):
+        moved = self.dir / "exported"
+        self.tdir.rename(moved)
+        self.run_harvest("--transcripts", str(moved))
+        self.assertIn("Build csvmd", (self.project / ".supervisor" / "harvest.md").read_text())
+
+    def test_harvest_with_no_sessions_exits_5_with_coverage_warning(self):
+        proc = self.run_harvest("--transcripts", str(self.dir / "nowhere"), expect=5)
+        self.assertIn("no session transcripts", proc.stderr.lower())
+
+    def test_harvest_truncates_very_long_prompts(self):
+        cwd = str(self.project.resolve())
+        write_session(self.tdir / "cccc-3333.jsonl", [human("2026-01-03T09:00:00Z", "cccc-3333", cwd, "Z" * 9000)])
+        self.run_harvest("--max-chars", "500")
+        text = (self.project / ".supervisor" / "harvest.md").read_text()
+        self.assertNotIn("Z" * 600, text)
+        self.assertIn("truncated", text)
+
+    def test_markdown_headings_inside_prompts_cannot_break_digest_structure(self):
+        # Real transcripts showed pasted specs ("## Vision") leaking in as digest sections.
+        cwd = str(self.project.resolve())
+        write_session(self.tdir / "dddd-4444.jsonl",
+                      [human("2026-01-04T09:00:00Z", "dddd-4444", cwd, "Spec:\n## Vision\nShip it")])
+        self.run_harvest()
+        lines = (self.project / ".supervisor" / "harvest.md").read_text().splitlines()
+        self.assertNotIn("## Vision", lines)
+        self.assertIn("> ## Vision", lines)
+
+    def test_sessions_lists_each_session_with_first_prompt(self):
+        proc = subprocess.run([sys.executable, str(CLI), "sessions"], cwd=self.project, capture_output=True,
+                              text=True, env={**os.environ, "CLAUDE_CONFIG_DIR": str(self.config)})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("aaaa-1111", proc.stdout)
+        self.assertIn("bbbb-2222", proc.stdout)
+        self.assertIn("Build csvmd", proc.stdout)
+
+    def test_criterion_source_is_recorded_and_shown_by_gate(self):
+        subprocess.run([sys.executable, str(CLI), "init", "--objective", "audit"], cwd=self.project, check=True,
+                       capture_output=True)
+        subprocess.run([sys.executable, str(CLI), "criterion", "add", "Missing file exits 3", "--source", "H2"],
+                       cwd=self.project, check=True, capture_output=True)
+        state = json.loads((self.project / ".supervisor" / "state.json").read_text())
+        self.assertEqual(state["criteria"]["AC1"]["source"], "H2")
+        out = subprocess.run([sys.executable, str(CLI), "gate"], cwd=self.project, capture_output=True, text=True).stdout
+        self.assertIn("[H2]", out)
