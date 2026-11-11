@@ -30,7 +30,7 @@ If `.supervisor/state.json` exists, you are **resuming**: run `$SUP resume` firs
 1. Inspect what exists (repo, docs, tests, prior memory) **before** asking anything.
 2. Write the brief with `templates/project-brief.md`: outcome, constraints, **explicit assumptions**, and scope (in / optional / excluded).
 3. `$SUP init --objective "..."`, then `$SUP criterion add "..." "..."`. Each criterion must be checkable by a command or an observation. Criteria cover **the whole agreed project, including work deferred to a later session**: the gate judges only those.
-4. Ask the user only when the answer changes architecture or scope **and** can't be inferred (§9).
+4. Don't ask what you can infer or decide (§9).
 5. When the brief conflicts with existing code or tests, the brief wins: `$SUP decide "..." --why "..."`.
 6. A user message that adds or changes requirements is recorded **when it arrives**: a `decide --why "user clarification"` plus a criterion. In testing, a fresh session deleted a feature requested only in chat.
 
@@ -85,11 +85,10 @@ Evidence is specific to *that* criterion: the command plus what you observed, no
 
 ## 6. Failures: bounded retries, then change strategy
 
-1. Reproduce; find the root cause before fixing.
-2. One focused fix; re-verify it and its neighbours.
-3. Log each failed fix: `$SUP task attempt T4 --note "regex tweak: still 404"`.
-4. **RETRY LIMIT** (3 per strategy): gather new evidence, then `$SUP task strategy T4 "instrument router"`.
-5. **STRATEGY LIMIT** (3 per task): escalate with the evidence log.
+Reproduce, find the root cause, make one focused fix, re-verify. Log each failed fix: `$SUP task attempt T4 --note "regex tweak: still 404"`.
+
+- **RETRY LIMIT** (3 per strategy): gather new evidence, then `$SUP task strategy T4 "instrument router"`.
+- **STRATEGY LIMIT** (3 per task): escalate with the evidence log.
 
 Triage playbook: `references/recovery.md`.
 
@@ -106,20 +105,20 @@ After an interruption, run `$SUP resume` and act in its order: don't redo *verif
 | Parallel running tasks | 3 (`--max-parallel`) | Queue it |
 | Failed attempts per strategy | 3 (`--max-attempts`) | New strategy |
 | Strategies per task | 3 (`--max-strategies`) | Escalate |
-| Delegation depth | 1 | Supervisor splits the task |
-| Scope | Agreed criteria | Stop when the gate passes. Optional ideas go to the user. |
+| Scope | Agreed criteria | Stop when the gate passes; offer extras, don't build them |
 
-## 9. Escalate rarely, precisely
+## 9. Decide yourself; ask only for four things
 
-Escalate only for an outcome-changing decision, missing access, a scope change, or authorization. Record it with the option you recommend:
+Work may wait for the owner **only** for `spend` (beyond an approved ceiling), `irreversible` (delete, publish, merge), `access` (you tried and failed to get it), or `goal` (scope changes). Everything else you decide, record, and report afterwards:
 
 ```bash
-$SUP ask "Postgres or SQLite?" --default "SQLite"              # reversible: continue on the default
-$SUP ask "Spend on the paid API?" --default "no" --blocks T7   # only T7 waits
-$SUP answer Q2 "yes, up to $5"                                 # becomes a decision; unblocks T7
+$SUP decide "export omits the cache folder" --why "init fails with it; reversible"
+$SUP ask "Postgres or SQLite?" --default "SQLite"                                 # assumption: work continues
+$SUP ask "Run the paid benchmark?" --default "no" --blocks T7 --because spend     # only T7 waits
+$SUP answer Q2 "yes, up to $5"                                                    # becomes a decision; unblocks T7
 ```
 
-`resume` lists open questions first: ask them once, together (`templates/escalation.md`), and keep working on everything not blocked. Never ask the user to say "continue", relay messages, or repeat what memory holds.
+Ask blocked questions once, together (`templates/escalation.md`). While `gate` or `resume` says **NOT A STOPPING POINT**, keep working. Never ask the user to say "continue". Research, debugging, dry runs and efficiency: `references/engineering.md`. Read it when starting Full mode.
 
 ## 10. Finish honestly
 
@@ -149,15 +148,13 @@ What was *asked* lives in past conversations; the newest work may be on another 
 | Script execution, or the CLI exits `4` (read-only shell) | **Before you finish**, write progress to `.supervisor/MANUAL.md` following `templates/memory.md`; `resume` shows it. Apply the guards yourself and say the gate is manual. |
 | Persistence | Print the memory at milestones for the user to save. |
 
-Details: `references/host-adaptation.md`.
+More: `references/host-adaptation.md`.
 
 ## Red flags: stop and correct
 
 - You claim "tests pass" without your own output.
-- A fourth variation of the same fix.
-- Redoing work that `resume` lists as verified and unchanged.
-- Fanning out to subagents for tracks of a few tool calls each.
 - Saying "complete" while `gate` exits non-zero.
 - A user requirement, or a question for the owner, that exists only in chat.
-- Ending a session blocked while unblocked work remains.
+- Asking the owner something reversible, or stopping while unblocked work remains.
+- An expensive or irreversible step with no dry run first.
 - Calling work "missing" without checking other branches.

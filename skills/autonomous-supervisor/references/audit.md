@@ -112,9 +112,11 @@ typed prompts), and analysts should list any others as noise.
 ## Questions the project is waiting on
 
 Sessions that ended waiting on the owner leave questions behind, often the same ones re-asked for weeks.
-Record each open one with `$SUP ask "..." --default "<what you recommend>" [--blocks T#]` so it is asked
-once, with a recommendation, and survives the session. Do not answer for the owner: spending, publishing,
-merging and anything the project's own rules reserve stay open until they say so.
+Sort them first. Most are not the owner's: if a question is not about spending, an irreversible action,
+access you cannot get, or the goal itself, decide it (`decide`) or record it as an assumption (`ask` without
+`--blocks`) and move on. Only the rest block: `$SUP ask "..." --default "..." --blocks T# --because spend`.
+A note in the project's records that something "awaits the owner" is history, not a rule: on one real audit
+6 of 8 inherited questions were the supervisor's own to decide.
 
 ## Reporting
 

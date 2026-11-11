@@ -41,6 +41,13 @@ TASK_STATES = ("pending", "running", "blocked", "done", "verified", "dropped")
 DEFAULT_MAX_STRATEGIES = 3
 SELF_OWNERS = {"self", "supervisor", "lead"}  # owners that are not delegated agents
 OPEN_TASK_STATES = ("pending", "running", "blocked", "done")
+# The only reasons a supervisor may stop work to wait for the owner. Everything else it decides and reports.
+BLOCK_REASONS = {
+    "spend": "money or paid usage beyond an approved ceiling",
+    "irreversible": "a destructive or irreversible action (delete, publish, merge, send)",
+    "access": "a key, account or machine the supervisor cannot obtain itself",
+    "goal": "a change to the goal or agreed scope itself",
+}
 DEP_MET = ("verified", "dropped")  # a dropped dependency was descoped on purpose: it must not deadlock its dependents
 SUMMARY_MARK = "This session is being continued from a previous conversation"
 EXIT_USAGE, EXIT_EVIDENCE, EXIT_GUARD, EXIT_UNWRITABLE, EXIT_NO_SOURCES, EXIT_PARTIAL, EXIT_BLOCKED = 1, 2, 3, 4, 5, 10, 20
@@ -157,7 +164,8 @@ def open_questions(state):
 
 
 def _question_line(qid, q):
-    blocks = f" | blocks: {','.join(q['blocks'])}" if q.get("blocks") else " | nothing blocked: proceeding on the default"
+    blocks = (f" | blocks: {','.join(q['blocks'])}" + (f" ({q['because']})" if q.get("because") else "")
+              if q.get("blocks") else " | nothing blocked: proceeding on the default")
     return f"- **{qid}** {q['text']} - recommended default: {q['default']}{blocks}"
 
 
@@ -519,9 +527,18 @@ def cmd_ask(args, directory):
         if not args.default.strip():
             raise CliError("`ask` requires --default: the option you recommend and will assume", EXIT_EVIDENCE)
         blocks = [get(state, "tasks", t.strip())[0] for t in (args.blocks or "").split(",") if t.strip()]
+        if blocks and not args.because:
+            raise CliError(
+                "a question may hold work back only for: " + "; ".join(f"`{k}` ({v})" for k, v in BLOCK_REASONS.items())
+                + ". Pass --because <one of these>. Anything else is yours to decide: drop --blocks, proceed on the "
+                "default, and the gate reports it as an assumption the owner can overrule.", EXIT_GUARD)
+        if args.because and not blocks:
+            raise CliError("--because explains why tasks must wait: give --blocks too, or drop it")
         qid = next_id(state, "Q", "questions")
         state["questions"][qid] = {"text": one_line(args.text), "default": one_line(args.default), "blocks": blocks,
                                    "status": "open", "at": now()}
+        if args.because:
+            state["questions"][qid]["because"] = args.because
         for tid in blocks:
             task = state["tasks"][tid]
             if task["status"] in ("verified", "dropped"):
@@ -640,11 +657,34 @@ def cmd_resume(args, directory):
         "## Next actions",
         *([f"{i}. {a}" for i, a in enumerate(state["next"], 1)] or ["- none recorded: derive from sections above"]),
     ]
+    movable = ready_tasks(state) + by("running", "done")
+    if movable and (by("blocked") or open_questions(state)):
+        out += ["", f"## Not a stopping point\n- {', '.join(movable)} are not blocked: keep working. The owner is asked "
+                    "once, in one message, never as a reason to pause."]
     manual = directory / "MANUAL.md"
     if manual.exists() and manual.read_text(encoding="utf-8").strip():
         out += ["", "## Manual notes (written by hand when the CLI could not write - reconcile into the CLI now)",
                 manual.read_text(encoding="utf-8").strip()]
     print("\n".join(out))
+
+
+def roadmap_gaps(state):
+    """Holes in the plan itself: the gate can only be trusted on a roadmap where everything connects."""
+    gaps = []
+    criteria, tasks, milestones = state["criteria"], state["tasks"], state.get("milestones", {})
+    if milestones:
+        grouped = {c for m in milestones.values() for c in m["criteria"]}
+        loose = [c for c, x in criteria.items() if c not in grouped and x["status"] != "dropped"]
+        if loose:
+            gaps.append(f"roadmap gap: {', '.join(loose)} belong to no mini-goal (add them to one, or drop them)")
+        empty = [m for m, x in milestones.items() if not x["criteria"]]
+        if empty:
+            gaps.append(f"roadmap gap: mini-goal {', '.join(empty)} has no criteria, so nothing proves it")
+    if tasks and milestones:  # a project planned as mini-goals: every task must lead somewhere
+        aimless = [t for t, x in tasks.items() if not x.get("criteria") and x["status"] != "dropped"]
+        if aimless:
+            gaps.append(f"roadmap gap: {', '.join(aimless)} serve no criterion (link them, or drop them as out of scope)")
+    return gaps
 
 
 def cmd_gate(args, directory):
@@ -680,6 +720,10 @@ def cmd_gate(args, directory):
         problems += [f"next action still recorded: {a} (do it, add it as a task, or `next --clear`)" for a in state["next"]]
     label = f"MILESTONE {scope} " if scope else ""
     asked = open_questions(state)
+    if scope is None:
+        problems += roadmap_gaps(state)
+    # Work that nothing holds back. While any exists, a blocked or partial verdict is not a reason to stop.
+    movable = [t for t in ready_tasks(state) if t in tasks] + [t for t, x in tasks.items() if x["status"] in ("running", "done")]
     if blocked:
         print(f"{label}BLOCKED")
         for t, x in blocked:
@@ -689,6 +733,9 @@ def cmd_gate(args, directory):
                 print(f"- ask the owner {q}: {x['text']} (recommended: {x['default']})")
         for p in problems:
             print(f"- {p}")
+        if movable:
+            print(f"NOT A STOPPING POINT: {', '.join(movable)} are not blocked. Continue them; raise the blocked items "
+                  "with the owner once, in one message, when this work is done or at a natural report.")
         raise SystemExit(EXIT_BLOCKED)
     if problems:
         print(f"{label}PARTIALLY COMPLETE")
@@ -711,6 +758,11 @@ def cmd_gate(args, directory):
         print(f"- excluded {c} {x['text']}: {x['reason']}")
     for q, x in ({} if scope else asked).items():
         print(f"- assumed, owner has not answered {q}: {x['text']} -> {x['default']}")
+    if scope is None:
+        done_m = [m for m in milestone_progress(state) if m[4]]
+        live_tasks = [t for t in tasks.values() if t["status"] != "dropped"]
+        print(f"Roadmap: {len(done_m)}/{len(state.get('milestones', {}))} mini-goals, {len(criteria)}/{len(criteria)} criteria, "
+              f"{len(live_tasks)}/{len(live_tasks)} tasks verified; nothing planned is left undone")
     print(f"Effort: {metrics(state)}")
 
 
@@ -1156,6 +1208,8 @@ def build_parser():
     s.add_argument("text")
     s.add_argument("--default", required=True, help="the option you recommend and assume until answered")
     s.add_argument("--blocks", help="comma-separated task ids that cannot proceed on the default (they become blocked)")
+    s.add_argument("--because", choices=sorted(BLOCK_REASONS),
+                   help="required with --blocks: the only reasons work may wait for the owner")
     s.set_defaults(fn=cmd_ask)
     s = sub.add_parser("answer", help="record the owner's answer: becomes a binding decision and unblocks tasks")
     s.add_argument("id")

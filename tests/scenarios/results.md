@@ -311,3 +311,36 @@ the skill's own audit flow on itself and on ECCode found these, each reproduced 
 
 **Not measured:** whether mini-goals and recorded questions reduce the number of prompts a human must send
 on a large build. That needs a with/without run on a multi-session project and has not been done.
+
+## 14. The supervisor asked too much (v1.5)
+
+After v1.4 the supervisor put eight questions to ECCode's owner in two rounds. The owner's reply: "Why you ask
+me? ... the goal of this skill is less interacting with the human." Reviewed one by one:
+
+| Question | Truly the owner's? |
+|---|---|
+| Approve the Stage 1 budget | yes: spend |
+| Delete a stray remote branch | yes: irreversible |
+| Confirm two counting interpretations | no: a default existed |
+| Who writes the hidden suite | no: the plan already said |
+| Let a test skip when a tool is absent | no: reversible |
+| Leave a folder out of an export so the command can run | no: reversible, and the only way it works |
+| Submit or drop a side project | no: blocked nothing |
+| Which machine runs the experiment | not yet: asked before trying to get Docker running |
+
+Six of eight were the supervisor's own. Two causes: the rule ("ask only when the answer changes the outcome")
+was advice, while `ask --blocks` let any question stop work; and the supervisor copied the project's history,
+where earlier sessions had reserved many decisions for the owner. It also ended a turn while an unblocked task
+remained, a listed red flag.
+
+**Changes, each with tests:**
+- `ask --blocks` requires `--because spend|irreversible|access|goal`; anything else is refused (exit 3) with the
+  instruction to decide and report.
+- `gate` and `resume` print **NOT A STOPPING POINT** while any task is ready, running or awaiting verification.
+- The gate checks the roadmap is whole when a project has mini-goals: a criterion outside every mini-goal, an
+  empty mini-goal, or a task serving no criterion keeps it at PARTIALLY COMPLETE. VERIFIED COMPLETE prints
+  the roadmap count.
+- New `references/engineering.md`: decide-don't-ask, research method, debugging method, dry run before any
+  expensive step, risk-first ordering, efficiency table, definition of done.
+
+**Not measured:** the effect on prompts per project. The only data is this one session.

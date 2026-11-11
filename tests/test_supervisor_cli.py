@@ -1031,21 +1031,21 @@ class TestOwnerQuestions(CliTestCase):
         self.assertIn("assumed, owner has not answered Q1: Postgres or SQLite? -> SQLite: no server needed", gate)
 
     def test_blocking_question_blocks_only_its_tasks_and_survives_into_resume_and_gate(self):
-        out = self.run_cli("ask", "May the benchmark spend money?", "--default", "no", "--blocks", "t2").stdout
+        out = self.run_cli("ask", "May the benchmark spend money?", "--default", "no", "--blocks", "t2", "--because", "spend").stdout
         self.assertIn("blocked T2", out)
         st = self.state()
         self.assertEqual(st["tasks"]["T2"]["status"], "blocked")
         self.assertEqual(st["tasks"]["T1"]["status"], "pending")
         resume = self.run_cli("resume").stdout
         self.assertIn("## Waiting on the owner", resume)
-        self.assertIn("**Q1** May the benchmark spend money? - recommended default: no | blocks: T2", resume)
+        self.assertIn("**Q1** May the benchmark spend money? - recommended default: no | blocks: T2 (spend)", resume)
         self.assertLess(resume.index("Waiting on the owner"), resume.index("Do not redo"))
         gate = self.run_cli("gate", expect=20).stdout
         self.assertIn("ask the owner Q1: May the benchmark spend money? (recommended: no)", gate)
         self.assertIn("Waiting on the owner", (self.dir / ".supervisor" / "MEMORY.md").read_text())
 
     def test_answer_becomes_a_binding_decision_and_unblocks(self):
-        self.run_cli("ask", "May the benchmark spend money?", "--default", "no", "--blocks", "T2")
+        self.run_cli("ask", "May the benchmark spend money?", "--default", "no", "--blocks", "T2", "--because", "spend")
         out = self.run_cli("answer", "q1", "yes, up to 5 dollars").stdout
         self.assertIn("recorded as D1; unblocked T2", out)
         st = self.state()
@@ -1063,8 +1063,8 @@ class TestOwnerQuestions(CliTestCase):
         self.assertEqual(self.state()["decisions"]["D1"]["text"], "Postgres or SQLite? -> SQLite")
 
     def test_task_blocked_by_two_questions_waits_for_both(self):
-        self.run_cli("ask", "Budget?", "--default", "none", "--blocks", "T2")
-        self.run_cli("ask", "Which machine?", "--default", "CI", "--blocks", "T2")
+        self.run_cli("ask", "Budget?", "--default", "none", "--blocks", "T2", "--because", "spend")
+        self.run_cli("ask", "Which machine?", "--default", "CI", "--blocks", "T2", "--because", "spend")
         self.assertIn("waiting on Q1, Q2", self.state()["tasks"]["T2"]["note"])   # not only the latest question
         self.run_cli("answer", "Q1", "5 dollars")
         self.assertEqual(self.state()["tasks"]["T2"]["status"], "blocked")
@@ -1073,8 +1073,8 @@ class TestOwnerQuestions(CliTestCase):
 
     def test_cannot_block_finished_work_or_unknown_tasks(self):
         self.run_cli("task", "set", "T1", "verified", "--evidence", "ok")
-        self.run_cli("ask", "Rename it?", "--default", "no", "--blocks", "T1", expect=1)
-        self.run_cli("ask", "Rename it?", "--default", "no", "--blocks", "T9", expect=1)
+        self.run_cli("ask", "Rename it?", "--default", "no", "--blocks", "T1", "--because", "goal", expect=1)
+        self.run_cli("ask", "Rename it?", "--default", "no", "--blocks", "T9", "--because", "goal", expect=1)
         self.assertEqual(self.state().get("questions", {}), {})
 
 
@@ -1155,3 +1155,93 @@ class TestBranchCountsInShallowClones(TestBranches):
         _git(self.full, "remote", "set-head", "origin", "--delete")
         out = self.branches(self.full).stdout
         self.assertFalse([line for line in out.splitlines() if line.startswith("| main |")], out)
+
+
+class TestSupervisorDecidesNotTheOwner(CliTestCase):
+    """On ECCode the supervisor put eight questions to the owner; six were its own to decide. Work may wait for
+    the owner only for money, irreversible actions, access it cannot get, or a change of goal."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+        self.run_cli("criterion", "add", "export works", "report sent")
+        self.run_cli("task", "add", "export", "--criteria", "AC1")
+        self.run_cli("task", "add", "send report", "--criteria", "AC2")
+
+    def test_blocking_without_one_of_the_four_reasons_is_refused(self):
+        proc = self.run_cli("ask", "Leave the cache folder out of the export?", "--default", "yes",
+                            "--blocks", "T1", expect=3)
+        self.assertIn("yours to decide", proc.stderr)
+        for reason in ("spend", "irreversible", "access", "goal"):
+            self.assertIn(f"`{reason}`", proc.stderr)
+        st = self.state()
+        self.assertEqual(st["tasks"]["T1"]["status"], "pending")
+        self.assertEqual(st.get("questions", {}), {})
+
+    def test_a_preference_is_not_a_reason(self):
+        proc = subprocess.run([sys.executable, str(CLI), "ask", "Tabs or spaces?", "--default", "spaces", "--blocks", "T1",
+                               "--because", "unsure"], cwd=self.dir, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self.state()["tasks"]["T1"]["status"], "pending")
+
+    def test_the_reason_is_recorded_and_shown(self):
+        self.run_cli("ask", "Email the report to the client?", "--default", "no", "--blocks", "T2", "--because", "irreversible")
+        self.assertEqual(self.state()["questions"]["Q1"]["because"], "irreversible")
+        self.assertIn("blocks: T2 (irreversible)", self.run_cli("resume").stdout)
+        self.run_cli("ask", "x?", "--default", "y", "--because", "spend", expect=1)   # a reason without anything blocked
+
+    def test_blocked_is_not_a_stopping_point_while_other_work_can_move(self):
+        self.run_cli("ask", "Email the report to the client?", "--default", "no", "--blocks", "T2", "--because", "irreversible")
+        gate = self.run_cli("gate", expect=20).stdout
+        self.assertIn("NOT A STOPPING POINT: T1 are not blocked", gate)
+        self.assertIn("## Not a stopping point", self.run_cli("resume").stdout)
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "export.csv has 3 rows")
+        gate = self.run_cli("gate", expect=20).stdout
+        self.assertNotIn("NOT A STOPPING POINT", gate)            # now only the owner can move it
+        self.assertNotIn("Not a stopping point", self.run_cli("resume").stdout)
+
+
+class TestRoadmapIsWhole(CliTestCase):
+    """Complete means the whole roadmap: every mini-goal proven, every criterion placed, every task leading somewhere."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+        self.run_cli("milestone", "add", "Core")
+        self.run_cli("criterion", "add", "parses", "--milestone", "M1")
+        self.run_cli("task", "add", "parser", "--criteria", "AC1")
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "test_parse OK")
+        self.run_cli("criterion", "verify", "AC1", "--evidence", "echo a,b | tool -> | a | b |")
+
+    def test_whole_roadmap_passes_and_is_counted(self):
+        gate = self.run_cli("gate").stdout
+        self.assertIn("Roadmap: 1/1 mini-goals, 1/1 criteria, 1/1 tasks verified; nothing planned is left undone", gate)
+
+    def test_criterion_outside_every_mini_goal_is_a_gap(self):
+        self.run_cli("criterion", "add", "exports")
+        self.run_cli("criterion", "verify", "AC2", "--evidence", "ran it")
+        gate = self.run_cli("gate", expect=10).stdout
+        self.assertIn("roadmap gap: AC2 belong to no mini-goal", gate)
+
+    def test_empty_mini_goal_and_aimless_task_are_gaps(self):
+        self.run_cli("milestone", "add", "Polish")
+        self.run_cli("task", "add", "refactor everything")
+        self.run_cli("task", "set", "T2", "verified", "--evidence", "ok")
+        gate = self.run_cli("gate", expect=10).stdout
+        self.assertIn("mini-goal M2 has no criteria", gate)
+        self.assertIn("T2 serve no criterion", gate)
+        self.run_cli("task", "set", "T2", "dropped")
+        self.assertNotIn("T2 serve", self.run_cli("gate", expect=10).stdout)
+
+    def test_small_projects_without_mini_goals_are_not_burdened(self):
+        other = self.dir / "lite"
+        other.mkdir()
+        env = {**os.environ, "SUPERVISOR_DIR": str(other / ".supervisor")}
+        run = lambda *a: subprocess.run([sys.executable, str(CLI), *a], cwd=other, capture_output=True, text=True, env=env)  # noqa: E731
+        run("init", "--objective", "small fix")
+        run("criterion", "add", "fixed")
+        run("task", "add", "do it")
+        run("task", "set", "T1", "verified", "--evidence", "ok")
+        run("criterion", "verify", "AC1", "--evidence", "ok")
+        proc = run("gate")
+        self.assertEqual(proc.returncode, 0, proc.stdout)

@@ -1,6 +1,8 @@
 # Escalation (send only when the work genuinely cannot proceed internally)
 
-Record it first: `$SUP ask "..." --default "..." [--blocks T#]`. Send all open questions in one message.
+Only four things may wait for the owner: `spend`, `irreversible`, `access`, `goal` (`references/engineering.md`).
+Record it first: `$SUP ask "..." --default "..." --blocks T# --because <one of the four>`. Send all blocked
+questions in one message, and keep working on everything else.
 
 **Blocked on:** (one sentence - the decision, access, or authorization)
 **Why it matters:** (which criterion / task cannot be completed without it)

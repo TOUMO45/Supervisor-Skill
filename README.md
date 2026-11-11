@@ -120,10 +120,17 @@ Questions only the owner can answer are recorded with a recommended default inst
 Work continues on the default unless the question blocks a task; the answer becomes a binding decision:
 
 ```bash
-$SUP ask "Postgres or SQLite?" --default "SQLite"               # keep working on the default
-$SUP ask "Spend on the paid API?" --default "no" --blocks T7    # only T7 waits
+$SUP ask "Postgres or SQLite?" --default "SQLite"                              # keep working on the default
+$SUP ask "Spend on the paid API?" --default "no" --blocks T7 --because spend   # only T7 waits
 $SUP answer Q2 "yes, up to \$5"                                 # recorded as a decision, T7 unblocked
 ```
+
+**The supervisor decides; the owner is asked only for four things (v1.5).** Work may wait for a human only
+for `spend`, `irreversible` actions, `access` the agent tried and failed to get, or a change of `goal`. The
+CLI refuses to block a task for any other reason, and while anything can still move, `gate` and `resume` print
+**NOT A STOPPING POINT**. "Complete" also means the whole roadmap: every mini-goal verified, every criterion
+inside a mini-goal, every task serving a criterion. How the lead researches, debugs, rehearses and stays
+efficient is in [`references/engineering.md`](skills/autonomous-supervisor/references/engineering.md).
 
 Why: auditing a real five-week project showed 14 of its 22 sessions ended waiting on the owner, and the
 same questions were asked again in later sessions because nothing had recorded them.
@@ -154,7 +161,7 @@ skills/autonomous-supervisor/
 │                               # escalation, final-delivery, memory (manual fallback)
 └── references/                 # delegation rules, recovery procedures, host adaptation, audit mode
 tests/
-├── test_supervisor_cli.py      # 102 behavioural tests of the CLI (incl. concurrency, harvest, branches)
+├── test_supervisor_cli.py      # 110 behavioural tests of the CLI (incl. concurrency, harvest, branches)
 ├── validate_skill.py           # structural lint (frontmatter, links, word budget)
 ├── scenarios/                  # 8 pressure scenarios + recorded results
 └── e2e/                        # benchmark briefs, seeded starter, hidden acceptance oracles,
