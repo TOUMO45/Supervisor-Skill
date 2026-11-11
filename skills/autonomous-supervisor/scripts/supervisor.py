@@ -586,7 +586,11 @@ SECRET_PATTERNS = [
     (re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|(?:access[_-]?|auth[_-]?)?token)\b(\s*[:=]\s*)\S+"), "credential"),
 ]
 NOISE_PREFIXES = ("<task-notification", "<system-reminder", "Stop hook feedback", "Caveat:", "<local-command",
-                  "[Request interrupted", "<command-stdout", "Base directory for this skill")
+                  "[Request interrupted", "<command-stdout", "Base directory for this skill",
+                  # harness messages seen in real cloud sessions (they carry no origin field):
+                  "Your response above was stopped", "Your response above was cut off",
+                  "This session is being continued from a previous conversation",
+                  "<artifact-content-authored-by-others", "Goal check-in:", "(Re-invocation of /")
 SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 
 

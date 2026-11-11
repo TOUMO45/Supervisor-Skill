@@ -851,6 +851,23 @@ class TestEventsImport(CliTestCase):
         self.assertEqual([r["text"] for r in recs if r["kind"] == "prompt"],
                          ["MASTER PROMPT: write addendum 3.\nDo not push.", "I authorize the push"])
 
+    def test_harness_messages_in_cloud_events_are_not_typed_prompts(self):
+        # Reading 22 real cloud sessions: ~45 of 202 "prompts" were harness text, not the owner's words.
+        noise = ["Your response above was stopped by a safety classifier. Continue.",
+                 "Your response above was cut off mid-stream. Rewrite it.",
+                 "This session is being continued from a previous conversation that ran out of context.",
+                 "<artifact-content-authored-by-others/> The summary below ...",
+                 "Goal check-in: «finish» is still open.",
+                 "(Re-invocation of /superpowers:writing-plans — continue)"]
+        data = [{"created_at": f"2026-11-01T10:0{i}:00Z", "user": {"message": {"role": "user", "content": n}}}
+                for i, n in enumerate(noise)]
+        data.append({"created_at": "2026-11-01T10:09:00Z", "user": {"message": {"role": "user", "content": "continue"}}})
+        page = self.dir / "noise.txt"
+        page.write_text(json.dumps({"ccr": {"data": data}}))
+        self.run_cli("events", str(page), "--session", "session_N", "--out", str(self.out))
+        recs = [json.loads(line) for line in self.out.read_text().splitlines()]
+        self.assertEqual([r["text"] for r in recs if r["kind"] == "prompt"], ["continue"])
+
     def test_file_without_events_is_a_clean_error(self):
         bad = self.dir / "bad.txt"
         bad.write_text("no json here")
