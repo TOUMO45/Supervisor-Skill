@@ -77,6 +77,23 @@ The skill triggers on project-sized work (or say *"use the autonomous-supervisor
 6. **Recover** — bounded retries, strategy changes, and `resume` after interruptions.
 7. **Deliver** — the gate's exact verdict, evidence per criterion, limitations, excluded scope.
 
+### Audit an old or interrupted project ("is it really 100% done?")
+
+Ask: *"I worked on this in earlier sessions — check everything I asked and tell me what's missing."*
+The supervisor finds this project's past Claude Code sessions on its own (`~/.claude/projects/`), extracts
+**every human prompt** (H1…Hn) and each session's final "done" claim, then verifies every requirement
+against the code **as it is now**, so old claims and passing tests don't count as proof.
+
+```bash
+$SUP sessions    # one line per past session: dates, prompt count, the original goal
+$SUP harvest     # .supervisor/harvest.md: all prompts + final claims, secrets redacted, git-ignored
+$SUP criterion add "missing file exits 3" --source H2   # requirement traced to the prompt it came from
+```
+
+The report (`templates/audit-report.md`) includes a traceability table, claims vs. reality, and a
+mandatory **coverage** section listing the sessions read and the sources it *couldn't* see, such as
+claude.ai chats or other machines. It never says "100% complete" while a source is uncovered.
+
 ### The memory CLI at a glance
 
 ```bash
@@ -90,6 +107,7 @@ $SUP criterion verify AC1 --evidence "echo 'c\na|b' | python3 -m csvmd -> 'a\|b'
 $SUP decide "Brief beats legacy test (newline -> <br>)" --why "spec is the contract"
 $SUP resume     # after an interruption: do-not-redo / in-flight / ready / binding decisions
 $SUP gate       # 0 VERIFIED COMPLETE | 10 PARTIALLY COMPLETE | 20 BLOCKED
+$SUP harvest    # audit: every human prompt from past sessions -> .supervisor/harvest.md
 ```
 
 ## Repository layout
@@ -98,11 +116,11 @@ $SUP gate       # 0 VERIFIED COMPLETE | 10 PARTIALLY COMPLETE | 20 BLOCKED
 skills/autonomous-supervisor/
 ├── SKILL.md                    # the operating procedure (≈1.3k words, loads on trigger)
 ├── scripts/supervisor.py       # durable memory + guards + completion gate (stdlib)
-├── templates/                  # project-brief, roadmap, task-assignment, verification-report,
+├── templates/                  # project-brief, roadmap, task-assignment, verification-report, audit-report,
 │                               # escalation, final-delivery, memory (manual fallback)
-└── references/                 # delegation rules, recovery procedures, host adaptation
+└── references/                 # delegation rules, recovery procedures, host adaptation, audit mode
 tests/
-├── test_supervisor_cli.py      # 45 behavioural tests of the CLI (incl. concurrency)
+├── test_supervisor_cli.py      # 53 behavioural tests of the CLI (incl. concurrency, harvest)
 ├── validate_skill.py           # structural lint (frontmatter, links, word budget)
 ├── scenarios/                  # 8 pressure scenarios + recorded results
 └── e2e/                        # benchmark briefs, seeded starter, hidden acceptance oracles,
@@ -124,6 +142,7 @@ shown to the agents. Details and transcripts summary: [`tests/scenarios/results.
 | E2E build, one session | 18/18 · 94k tokens · 5 calls | 18/18 · 100k tokens · 8 calls · chose **Lite** mode |
 | Interruption, fully specified brief | 18/18 · no durable handoff | 18/18 · full `.supervisor/` memory |
 | Full mode: 3 parallel workers vs one agent (`textkit`) | 21/21 · 14 tests · 92k tokens · 28s | 21/21 · **35 tests** · ~3x tokens · 71s · zero file conflicts |
+| **Audit this repo against its real 5.8 MB session history** (location not given) | Correct verdict · 139k tokens · 20 tool calls · partly quoted the old session's own notes | Correct verdict · **116k tokens · 13 tool calls** · verified each gap directly · coverage stated |
 | **Interruption + user clarifications given mid-session** | **18/20**: session 2 *deleted* a user-requested feature as "scope creep" and dropped the exit-code override | **20/20**: both honoured via a binding decision, deviation from the brief disclosed |
 
 **Honest reading:** on small, fully specified, single-session work a strong model doesn't need

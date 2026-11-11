@@ -172,3 +172,45 @@ exposed a real gap: the CLI died with a raw `OSError` and the skill had no rule 
 exits `4` with an actionable message, the skill's host-adaptation table says to record progress in
 `.supervisor/MANUAL.md` (never overwritten by the CLI, shown by `resume`), and re-tests went from
 0/2 to **3/3** runs recording progress, all honestly reporting "gate is manual this session".
+
+## 10. v1.2 audit mode: reconstruct what was asked from past sessions
+
+**Feature:** `sessions` / `harvest` read Claude Code session history (`~/.claude/projects/`, matched by folder
+name *or* recorded working directory). They extract only human prompts (origin `human`, never tool results,
+notifications, hook feedback, injected skill text or subagent transcripts) plus each session's final claim,
+redact secrets and git-ignore the digest. `criterion add --source H#` traces each requirement to its prompt.
+SKILL.md §11, `references/audit.md` and `templates/audit-report.md` hold the procedure.
+
+**Real-data check:** on this repo's own 5.8 MB transcript, harvest found **11/11** human prompts and nothing
+else, in **0.08 s**, giving a **6.8 KB** digest (~850x smaller). Bug found and fixed (TDD): Markdown headings
+inside a pasted prompt leaked into the digest structure. Prompts are now quoted.
+
+**Benchmark 1, transcripts location given** (fixture: brief met, two chat requirements buried mid-session in
+388 KB of tool noise, final claim "finished, all tests pass"):
+
+| Arm | Found both gaps | Tokens | Calls |
+|---|---|---|---|
+| No skill | yes | 97k | 5 |
+| Skill v1.1 (no audit guidance) | yes (+ flagged an unspecified edge case) | 101k | 6 |
+
+When pointed at a small history, a strong model audits it fine alone.
+
+**Benchmark 2, live audit of this repo, history location NOT given** (ground truth written before results:
+H11 audit feature unfinished; H5-H7 questions; H4/H8-H10 chat-only deliverables):
+
+| Arm | Verdict | Tokens | Calls | Notes |
+|---|---|---|---|---|
+| No skill | correct (H11 incomplete) | 139k | 20 | found `~/.claude/projects` itself; part of its gap evidence quoted the old session's own progress notes |
+| **Skill v1.2** | correct, gate PARTIALLY COMPLETE | **116k** | **13** | verified each gap directly (zip contents, installed plugin version, README grep); coverage section listed unseen sources |
+
+Detection ties on this history size. The skill was ~17% cheaper in tokens and ~35% in tool calls, and its
+evidence didn't depend on a previous agent having narrated its gaps. n=1 per arm: treat as signal, not proof.
+
+**Note on test design:** planting fixture sessions in `~/.claude/projects/` was blocked by the environment's
+safety classifier as transcript tampering. That block is correct, which is why benchmark 2 used the real history.
+
+**Trigger regression after the description change:** 16/16 runs. The new `trigger-audit-old-project` case fired
+2/2; all earlier positives still fire and the typo/question negatives don't.
+
+**CI:** `tests/e2e/audit/make_fixture.py` + a CI step checks harvest finds the buried requirement, excludes
+noise, and that the oracle confirms both gaps (18/20 on `--clarified`).

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Build the audit benchmark: an "old project" plus its Claude Code session history.
 
-Usage: python3 tests/e2e/audit/make_fixture.py <project_src> <out_dir>
-  <project_src>  a finished csvmd build that meets brief.md but lost the two chat clarifications
+Usage: python3 tests/e2e/audit/make_fixture.py <out_dir> [project_src]
+  [project_src]  a csvmd build that meets brief.md but lacks the two chat clarifications
+                 (default: tests/e2e/reference, which is exactly that)
   <out_dir>      receives project/ (copy + brief.md) and transcripts/ (two session .jsonl files)
 
 Ground truth: brief.md is fully met, but the user asked in chat (session 1, mid-way, amid tool noise) for
@@ -41,7 +42,8 @@ def noise(ts_prefix, sid, cwd, n, seed_text):
     return out
 
 
-def main(src, out):
+def main(out, src=None):
+    src = src or ROOT / "tests/e2e/reference"
     out = Path(out)
     if out.exists():
         shutil.rmtree(out)

@@ -24,3 +24,13 @@ jobs:
       - name: Eval scaffolds seed their workspaces
         run: |
           for c in $(find evals -name scaffold.sh); do d=$(mktemp -d); (cd "$d" && bash "$GITHUB_WORKSPACE/$c") || exit 1; done
+      - name: Audit mode end-to-end (harvest finds the buried chat requirement; oracle confirms the gaps)
+        run: |
+          python tests/e2e/audit/make_fixture.py /tmp/audit >/dev/null
+          cd /tmp/audit/project
+          python "$GITHUB_WORKSPACE/skills/autonomous-supervisor/scripts/supervisor.py" harvest --transcripts /tmp/audit/transcripts
+          grep -q "3 human prompt" .supervisor/harvest.md
+          grep -q "must exit with code 3" .supervisor/harvest.md
+          grep -q "CSVMD_MAX_WIDTH" .supervisor/harvest.md
+          ! grep -q "test_core ... ok" .supervisor/harvest.md
+          ! python -I "$GITHUB_WORKSPACE/tests/e2e/hidden_acceptance.py" . --clarified
