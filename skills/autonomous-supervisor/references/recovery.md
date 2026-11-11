@@ -28,6 +28,8 @@ add instrumentation/logging, bisect, read the framework source, write a minimal 
 3. For **running** items: look for the agent's report or its file changes; mark `done` then verify, or reset to `pending` with a note.
 4. Recorded decisions are binding; reversing one needs a new `decide` with a reason.
 5. Continue from **Next actions**. Do not ask the user to restate anything memory already holds.
+6. **Waiting on the owner** is not a reason to stop: ask the open questions once, then work on everything
+   they do not block. When the answer arrives: `$SUP answer Q# "..."`.
 
 ## Corrupted or missing memory
 

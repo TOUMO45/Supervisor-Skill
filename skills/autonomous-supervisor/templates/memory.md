@@ -8,6 +8,12 @@ _Updated: <timestamp>. Apply the CLI's guards yourself: no `verified` without ev
 ## Acceptance criteria
 - **AC1** <text> - `pending|verified|failed` - evidence: <command + result>
 
+## Milestones (mini-goals, in order)
+- **M1** <observable outcome> - n/m criteria verified (AC1, AC2)
+
+## Waiting on the owner
+- **Q1** <question> - recommended default: <option> | blocks: T# or nothing
+
 ## Tasks
 - **T1** <title> - `pending|running|blocked|done|verified|dropped` | owner: | after: | serves: | files: | attempts: n
   - strategy: / evidence: / note:

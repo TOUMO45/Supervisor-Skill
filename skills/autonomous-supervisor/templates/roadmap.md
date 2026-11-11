@@ -3,10 +3,11 @@
 ## Architecture sketch
 (components, data flow, interfaces agreed between tasks - record each as `$SUP decide`)
 
-## Milestones
+## Milestones (mini-goals) -> `$SUP milestone add`, `$SUP criterion add ... --milestone M1`
+Each is a slice a user could see working. Order them so the riskiest assumption is tested first.
 | # | Outcome (observable) | Criteria served | Exit check |
 |---|---|---|---|
-| M1 | | AC1 | |
+| M1 | | AC1 | `$SUP gate --milestone M1` |
 
 ## Tasks -> `$SUP task add`
 | ID | Task | Depends | Owns files | Serves | Owner (self / role) | Parallel? |

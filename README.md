@@ -106,6 +106,28 @@ The report (`templates/audit-report.md`) includes a traceability table, claims v
 mandatory **coverage** section listing the sessions read and the sources it *couldn't* see, such as
 claude.ai chats or other machines. It never says "100% complete" while a source is uncovered.
 
+### Big projects: mini-goals and questions for the owner (v1.4)
+
+A large project is delivered as ordered **mini-goals**, each with its own criteria and its own gate, so
+there is always one small, checkable target in front of the agent:
+
+```bash
+$SUP milestone add "Core parses CSV" && $SUP criterion add "pipes escaped" "empty input ok" --milestone M1
+$SUP gate --milestone M1        # MILESTONE M1 VERIFIED - only the project gate decides "complete"
+```
+
+Questions only the owner can answer are recorded with a recommended default instead of living in chat.
+Work continues on the default unless the question blocks a task; the answer becomes a binding decision:
+
+```bash
+$SUP ask "Postgres or SQLite?" --default "SQLite"               # keep working on the default
+$SUP ask "Spend on the paid API?" --default "no" --blocks T7    # only T7 waits
+$SUP answer Q2 "yes, up to \$5"                                 # recorded as a decision, T7 unblocked
+```
+
+Why: auditing a real five-week project showed 14 of its 22 sessions ended waiting on the owner, and the
+same questions were asked again in later sessions because nothing had recorded them.
+
 ### The memory CLI at a glance
 
 ```bash
@@ -132,7 +154,7 @@ skills/autonomous-supervisor/
 │                               # escalation, final-delivery, memory (manual fallback)
 └── references/                 # delegation rules, recovery procedures, host adaptation, audit mode
 tests/
-├── test_supervisor_cli.py      # 70 behavioural tests of the CLI (incl. concurrency, harvest, branches)
+├── test_supervisor_cli.py      # 102 behavioural tests of the CLI (incl. concurrency, harvest, branches)
 ├── validate_skill.py           # structural lint (frontmatter, links, word budget)
 ├── scenarios/                  # 8 pressure scenarios + recorded results
 └── e2e/                        # benchmark briefs, seeded starter, hidden acceptance oracles,

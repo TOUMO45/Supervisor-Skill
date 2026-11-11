@@ -282,3 +282,32 @@ taken for typed prompts.
   had missed). The audit was corrected, and `references/audit.md` now requires checking date and context.
 - End-of-turn summaries were captured at 2,500 characters at first, cutting some "decision needed"
   sections; raised to 9,000 for the later sessions.
+
+## 13. Second run on ECCode (v1.4): what the tool itself got wrong or lacked
+
+A fresh session was asked to pick the project up again. Everything the earlier study had produced was in an
+ephemeral scratchpad and was gone; only the skill, the repository and the cloud sessions remained. Running
+the skill's own audit flow on itself and on ECCode found these, each reproduced before it was fixed:
+
+| Found | How | Fix |
+|---|---|---|
+| `branches` reported the latest branch **640** commits ahead; the true figure is **284** | shallow clone: counts stop at the cut. The warning also still said "re-run with --fetch" after `--fetch` | `--fetch` now fetches full history; warning rewritten; regression test on a shallow clone |
+| Final claim of a 5-week session was "Nothing changed on the pull request" | the session ended in automatic PR check-ins | `events` keeps the last three assistant messages |
+| The cheapest source was being thrown away | continuation summaries were filtered as harness noise, yet the last page of one long session held all 16 of its user messages | `events`/`harvest` extract them as a separate, labelled lead; coverage says which sessions rest on a summary only |
+| Two agents could own the same file | `./src//a.py` and `src/a.py` did not overlap | paths normalised when a task is added |
+| Traceback instead of an error | an absolute path in `--files` crashed `verified` | refused at `task add`; tolerated in old state files |
+| `--evidence " "` verified a criterion | blank string passed the check | blank evidence and reasons are refused (exit 2) |
+| A task waiting on a dropped task could never start | dependency had to be `verified` | a dropped dependency no longer holds dependents; the drop names them |
+| Sort by date compared local-time text | branches committed in different time zones | sorted by commit instant |
+
+**Missing capabilities, added:**
+- **Owner questions (`ask` / `answer`).** In ECCode's history 14 of 22 sessions ended waiting on the owner,
+  and the open questions were re-derived each session. They are now state: recorded with a recommended
+  default, shown first by `resume`, blocking only the tasks named, listed by the gate, and turned into a
+  binding decision when answered. The earlier study itself is the proof of need: its ten recommendations
+  were lost with its container.
+- **Mini-goals (`milestone add`, `gate --milestone`).** A large project now has ordered, separately gated
+  slices; `resume` marks the current one. A verified mini-goal never makes the project gate pass.
+
+**Not measured:** whether mini-goals and recorded questions reduce the number of prompts a human must send
+on a large build. That needs a with/without run on a multi-session project and has not been done.

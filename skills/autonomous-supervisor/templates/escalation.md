@@ -1,5 +1,7 @@
 # Escalation (send only when the work genuinely cannot proceed internally)
 
+Record it first: `$SUP ask "..." --default "..." [--blocks T#]`. Send all open questions in one message.
+
 **Blocked on:** (one sentence - the decision, access, or authorization)
 **Why it matters:** (which criterion / task cannot be completed without it)
 **Already tried:** (what you checked or attempted, briefly)

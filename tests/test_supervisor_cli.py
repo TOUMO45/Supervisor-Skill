@@ -890,3 +890,265 @@ class TestClosedPipe(CliTestCase):
         self.assertEqual(proc.wait(), 0, err)
         self.assertNotIn("cannot write project memory", err)
         self.assertNotIn("Traceback", err)
+
+
+class TestGuardHoles(CliTestCase):
+    """Found by running the skill on a real project (ECCode, v1.4): ways past the guards."""
+
+    def test_same_file_spelled_differently_still_overlaps(self):
+        self.init()
+        self.run_cli("task", "add", "A", "--files", "src/a.py")
+        self.run_cli("task", "add", "B", "--files", "./src//a.py")
+        self.assertEqual(self.state()["tasks"]["T2"]["files"], ["src/a.py"])
+        self.run_cli("task", "set", "T1", "running", "--owner", "agent-1")
+        proc = self.run_cli("task", "set", "T2", "running", "--owner", "agent-2", expect=3)
+        self.assertIn("file ownership overlaps", proc.stderr)
+
+    def test_files_outside_the_project_are_refused_not_a_traceback(self):
+        self.init()
+        for bad in (str(self.dir / "x.py"), "../x.py", "."):
+            proc = self.run_cli("task", "add", "A", "--files", bad, expect=1)
+            self.assertIn("relative to the project root", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(self.state()["tasks"], {})
+
+    def test_absolute_pattern_in_an_older_state_file_does_not_crash_verification(self):
+        self.init()
+        self.run_cli("task", "add", "A", "--files", "a.py")
+        path = self.dir / ".supervisor" / "state.json"
+        st = json.loads(path.read_text())
+        st["tasks"]["T1"]["files"] = [str(self.dir / "*.py")]
+        path.write_text(json.dumps(st))
+        proc = self.run_cli("task", "set", "T1", "verified", "--evidence", "ran it")
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_blank_evidence_is_not_evidence(self):
+        self.init()
+        self.run_cli("criterion", "add", "works")
+        self.run_cli("task", "add", "A")
+        self.run_cli("criterion", "verify", "AC1", "--evidence", "   ", expect=2)
+        self.run_cli("task", "set", "T1", "verified", "--evidence", " ", expect=2)
+        self.run_cli("criterion", "drop", "AC1", "--reason", " ", expect=2)
+        self.assertEqual(self.state()["criteria"]["AC1"]["status"], "pending")
+
+    def test_dropping_a_task_does_not_deadlock_its_dependents(self):
+        self.init()
+        self.run_cli("task", "add", "optional spike")
+        self.run_cli("task", "add", "real work", "--depends", "T1")
+        out = self.run_cli("task", "set", "T1", "dropped").stdout
+        self.assertIn("T2 depended on T1", out)
+        self.assertIn("T2", self.run_cli("ready").stdout)
+        self.run_cli("task", "set", "T2", "running", "--owner", "supervisor")
+
+
+class TestMilestones(CliTestCase):
+    """A big project is delivered as ordered mini-goals, each with its own gate."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+        self.run_cli("milestone", "add", "Core parses CSV")
+        self.run_cli("milestone", "add", "CLI ships")
+        self.run_cli("criterion", "add", "pipes escaped", "empty input ok", "--milestone", "M1")
+        self.run_cli("criterion", "add", "--align flag", "--milestone", "m2")
+        self.run_cli("task", "add", "core", "--criteria", "AC1,AC2")
+        self.run_cli("task", "add", "cli", "--criteria", "AC3", "--depends", "T1")
+
+    def test_criteria_are_grouped_and_current_mini_goal_is_marked(self):
+        self.assertEqual(self.state()["milestones"]["M1"]["criteria"], ["AC1", "AC2"])
+        resume = self.run_cli("resume").stdout
+        self.assertIn("**M1** Core parses CSV - 0/2 criteria verified (AC1, AC2)  <- current mini-goal", resume)
+        self.assertNotIn("CLI ships - 0/1 criteria verified (AC3)  <-", resume)
+        self.assertIn("## Milestones", (self.dir / ".supervisor" / "MEMORY.md").read_text())
+
+    def test_milestone_gate_judges_only_its_own_criteria_and_tasks(self):
+        proc = self.run_cli("gate", "--milestone", "M1", expect=10)
+        self.assertIn("MILESTONE M1 PARTIALLY COMPLETE", proc.stdout)
+        self.assertNotIn("AC3", proc.stdout)
+        self.assertNotIn("T2", proc.stdout)
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "test_core: 6 OK")
+        self.run_cli("criterion", "verify", "AC1", "--evidence", "test_pipe OK")
+        self.run_cli("criterion", "verify", "AC2", "--evidence", "test_empty OK")
+        self.run_cli("next", "start the CLI")       # planned later work does not hold back a finished mini-goal
+        proc = self.run_cli("gate", "--milestone", "M1")
+        self.assertIn("MILESTONE M1 VERIFIED (2 criteria)", proc.stdout)
+        self.assertIn("only the project `gate` decides completion", proc.stdout)
+        self.assertIn("CLI ships - 0/1 criteria verified (AC3)  <- current mini-goal", self.run_cli("resume").stdout)
+
+    def test_a_verified_milestone_never_makes_the_project_complete(self):
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "ok")
+        self.run_cli("criterion", "verify", "AC1", "AC2", "--evidence", "ok")
+        proc = self.run_cli("gate", expect=10)
+        self.assertTrue(proc.stdout.startswith("PARTIALLY COMPLETE"))
+
+    def test_unknown_or_empty_milestone_is_an_error(self):
+        self.run_cli("gate", "--milestone", "M9", expect=1)
+        self.run_cli("criterion", "add", "x", "--milestone", "M9", expect=1)
+        self.run_cli("milestone", "add", "Empty one")
+        proc = self.run_cli("gate", "--milestone", "M3", expect=1)
+        self.assertIn("has no criteria", proc.stderr)
+
+    def test_project_created_before_milestones_existed_still_works(self):
+        path = self.dir / ".supervisor" / "state.json"
+        st = json.loads(path.read_text())
+        st.pop("milestones")
+        st["counters"].pop("M")
+        path.write_text(json.dumps(st))
+        self.run_cli("resume")
+        self.run_cli("milestone", "add", "Later addition", "--criteria", "AC1")
+        self.run_cli("ask", "Which database?", "--default", "SQLite")
+
+
+class TestOwnerQuestions(CliTestCase):
+    """14 of 22 sessions of a real project ended waiting on its owner, and the same questions were re-asked
+    session after session because they lived only in chat."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+        self.run_cli("criterion", "add", "stores data", "benchmark run")
+        self.run_cli("task", "add", "storage layer", "--criteria", "AC1")
+        self.run_cli("task", "add", "paid benchmark", "--criteria", "AC2")
+
+    def test_question_needs_a_recommended_default(self):
+        proc = subprocess.run([sys.executable, str(CLI), "ask", "Which database?"], cwd=self.dir,
+                              capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.run_cli("ask", "Which database?", "--default", "  ", expect=2)
+
+    def test_non_blocking_question_lets_work_continue_and_is_reported_as_an_assumption(self):
+        out = self.run_cli("ask", "Postgres or SQLite?", "--default", "SQLite: no server needed").stdout
+        self.assertIn("Q1 recorded; nothing blocked", out)
+        self.assertEqual(self.state()["tasks"]["T1"]["status"], "pending")
+        self.run_cli("criterion", "drop", "AC2", "--reason", "owner descoped")
+        self.run_cli("task", "set", "T2", "dropped")
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "test_store OK")
+        self.run_cli("criterion", "verify", "AC1", "--evidence", "row survives restart")
+        gate = self.run_cli("gate").stdout
+        self.assertIn("VERIFIED COMPLETE on 1 unconfirmed assumption(s)", gate)
+        self.assertIn("assumed, owner has not answered Q1: Postgres or SQLite? -> SQLite: no server needed", gate)
+
+    def test_blocking_question_blocks_only_its_tasks_and_survives_into_resume_and_gate(self):
+        out = self.run_cli("ask", "May the benchmark spend money?", "--default", "no", "--blocks", "t2").stdout
+        self.assertIn("blocked T2", out)
+        st = self.state()
+        self.assertEqual(st["tasks"]["T2"]["status"], "blocked")
+        self.assertEqual(st["tasks"]["T1"]["status"], "pending")
+        resume = self.run_cli("resume").stdout
+        self.assertIn("## Waiting on the owner", resume)
+        self.assertIn("**Q1** May the benchmark spend money? - recommended default: no | blocks: T2", resume)
+        self.assertLess(resume.index("Waiting on the owner"), resume.index("Do not redo"))
+        gate = self.run_cli("gate", expect=20).stdout
+        self.assertIn("ask the owner Q1: May the benchmark spend money? (recommended: no)", gate)
+        self.assertIn("Waiting on the owner", (self.dir / ".supervisor" / "MEMORY.md").read_text())
+
+    def test_answer_becomes_a_binding_decision_and_unblocks(self):
+        self.run_cli("ask", "May the benchmark spend money?", "--default", "no", "--blocks", "T2")
+        out = self.run_cli("answer", "q1", "yes, up to 5 dollars").stdout
+        self.assertIn("recorded as D1; unblocked T2", out)
+        st = self.state()
+        self.assertEqual(st["tasks"]["T2"]["status"], "pending")
+        self.assertEqual(st["decisions"]["D1"]["text"], "May the benchmark spend money? -> yes, up to 5 dollars")
+        self.assertNotIn("Waiting on the owner", self.run_cli("resume").stdout)
+        proc = self.run_cli("answer", "Q1", "no", expect=1)
+        self.assertIn("already answered", proc.stderr)
+
+    def test_accepting_the_default_and_usage_errors(self):
+        self.run_cli("ask", "Postgres or SQLite?", "--default", "SQLite")
+        self.run_cli("answer", "Q1", expect=1)
+        self.run_cli("answer", "Q1", "Postgres", "--accept", expect=1)
+        self.run_cli("answer", "Q1", "--accept")
+        self.assertEqual(self.state()["decisions"]["D1"]["text"], "Postgres or SQLite? -> SQLite")
+
+    def test_task_blocked_by_two_questions_waits_for_both(self):
+        self.run_cli("ask", "Budget?", "--default", "none", "--blocks", "T2")
+        self.run_cli("ask", "Which machine?", "--default", "CI", "--blocks", "T2")
+        self.run_cli("answer", "Q1", "5 dollars")
+        self.assertEqual(self.state()["tasks"]["T2"]["status"], "blocked")
+        self.run_cli("answer", "Q2", "--accept")
+        self.assertEqual(self.state()["tasks"]["T2"]["status"], "pending")
+
+    def test_cannot_block_finished_work_or_unknown_tasks(self):
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "ok")
+        self.run_cli("ask", "Rename it?", "--default", "no", "--blocks", "T1", expect=1)
+        self.run_cli("ask", "Rename it?", "--default", "no", "--blocks", "T9", expect=1)
+        self.assertEqual(self.state().get("questions", {}), {})
+
+
+class TestContinuationSummaries(CliTestCase):
+    """Reading 22 real sessions took 989 pages. The last page of a long session often holds the agent's own
+    summary of everything before it, including the user's messages: read that first."""
+
+    SUMMARY = ("<artifact-content-authored-by-others/>\nThis session is being continued from a previous conversation "
+               "that ran out of context.\nSummary:\n6. All user messages:\n- \"Build me this skill\"\n"
+               "- \"add an audit mode\" token=abcdefghijklmnopqrstuvwxyz123456")
+
+    def setUp(self):
+        super().setUp()
+        def ev(ts, role, content):
+            return {"created_at": ts, role: {"internal_anthropic_catchall": {"message": {"role": role, "content": content}}}}
+        text = lambda t: [{"type": "text", "text": t}]  # noqa: E731
+        page = {"ccr": {"data": [
+            ev("2026-11-11T18:14:42Z", "user", self.SUMMARY),
+            ev("2026-11-11T18:15:40Z", "assistant", text("PR is green. ECCode still waits on four owner decisions.")),
+            ev("2026-11-11T18:15:59Z", "assistant", text("Nothing new on the pull request.")),
+            ev("2026-11-11T19:08:00Z", "assistant", text("Nothing changed on the pull request.")),
+        ]}}
+        self.page = self.dir / "tail.txt"
+        self.page.write_text(json.dumps(page))
+        self.out = self.dir / "cloud.jsonl"
+
+    def test_summary_is_extracted_not_dropped_and_not_counted_as_a_typed_prompt(self):
+        out = self.run_cli("events", str(self.page), "--session", "S1", "--out", str(self.out)).stdout
+        self.assertIn("0 typed prompt(s)", out)
+        self.assertIn("1 continuation summary", out)
+        recs = [json.loads(line) for line in self.out.read_text().splitlines()]
+        self.assertEqual([r["kind"] for r in recs], ["summary", "claim"])
+        self.assertIn("All user messages", recs[0]["text"])
+
+    def test_closing_status_is_not_lost_behind_automatic_check_ins(self):
+        self.run_cli("events", str(self.page), "--session", "S1", "--out", str(self.out))
+        claim = [json.loads(line) for line in self.out.read_text().splitlines()][-1]["text"]
+        self.assertIn("four owner decisions", claim)
+        self.assertTrue(claim.endswith("Nothing changed on the pull request."))
+
+    def test_harvest_shows_the_summary_as_a_lead_and_says_what_it_does_not_cover(self):
+        self.run_cli("events", str(self.page), "--session", "S1", "--out", str(self.out))
+        self.run_cli("harvest", "--transcripts", str(self.dir / "none"), "--extra", str(self.out))
+        digest = (self.dir / ".supervisor" / "harvest.md").read_text()
+        self.assertIn("Continuation summary written by the agent at 2026-11-11T18:14", digest)
+        self.assertIn('> - "add an audit mode"', digest)
+        self.assertIn("covered only by the agent's own continuation summary", digest)
+        self.assertNotIn("### H1", digest)
+        self.assertNotIn("abcdefghijklmnopqrstuvwxyz123456", digest)
+
+    def test_local_transcript_summary_is_kept_too(self):
+        folder = self.dir / "t"
+        folder.mkdir()
+        lines = [
+            {"type": "user", "timestamp": "2026-11-01T10:00:00Z", "message": {"role": "user", "content": self.SUMMARY}},
+            {"type": "user", "timestamp": "2026-11-01T10:01:00Z", "origin": {"kind": "human"},
+             "message": {"role": "user", "content": "now add export"}},
+        ]
+        (folder / "s.jsonl").write_text("\n".join(json.dumps(x) for x in lines))
+        self.run_cli("harvest", "--transcripts", str(folder))
+        digest = (self.dir / ".supervisor" / "harvest.md").read_text()
+        self.assertIn("1 human prompt(s)", digest)
+        self.assertIn("Continuation summary written by the agent", digest)
+
+
+class TestBranchCountsInShallowClones(TestBranches):
+    """On ECCode a shallow clone reported the latest branch as 640 commits ahead; the true figure was 284."""
+
+    def test_fetch_gets_full_history_so_counts_are_true(self):
+        before = self.branches(self.shallow, "--remote").stdout
+        self.assertIn("counts stop at the shallow", before)
+        out = self.branches(self.shallow, "--fetch").stdout
+        row = next(line for line in out.splitlines() if "feature/x" in line and "|" in line)
+        self.assertIn("| 3 | 0 |", row)
+        self.assertNotIn("shallow", out)
+
+    def test_default_branch_is_never_listed_against_itself(self):
+        _git(self.full, "remote", "set-head", "origin", "--delete")
+        out = self.branches(self.full).stdout
+        self.assertFalse([line for line in out.splitlines() if line.startswith("| main |")], out)

@@ -8,7 +8,7 @@ after every write, so any agent - or a human - can read the current truth.
 Exit codes
   0   ok / VERIFIED COMPLETE
   1   usage or input error
-  2   evidence missing (verification claims require --evidence)
+  2   evidence, reason or recommended default missing (claims and questions must carry one)
   3   guard tripped (dependency, parallel limit, file overlap, retry limit)
   4   memory directory not writable (sandbox / read-only filesystem) - use the manual fallback
   5   harvest/sessions: no session transcripts found for this project
@@ -24,6 +24,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -40,6 +41,8 @@ TASK_STATES = ("pending", "running", "blocked", "done", "verified", "dropped")
 DEFAULT_MAX_STRATEGIES = 3
 SELF_OWNERS = {"self", "supervisor", "lead"}  # owners that are not delegated agents
 OPEN_TASK_STATES = ("pending", "running", "blocked", "done")
+DEP_MET = ("verified", "dropped")  # a dropped dependency was descoped on purpose: it must not deadlock its dependents
+SUMMARY_MARK = "This session is being continued from a previous conversation"
 EXIT_USAGE, EXIT_EVIDENCE, EXIT_GUARD, EXIT_UNWRITABLE, EXIT_NO_SOURCES, EXIT_PARTIAL, EXIT_BLOCKED = 1, 2, 3, 4, 5, 10, 20
 
 
@@ -111,13 +114,13 @@ def save(directory, state):
 def next_id(state, prefix, bucket):
     state["counters"][prefix] = state["counters"].get(prefix, 0) + 1
     new = f"{prefix}{state['counters'][prefix]}"
-    assert new not in state[bucket]
+    assert new not in state.setdefault(bucket, {})  # setdefault: buckets added after a project was created
     return new
 
 
 def get(state, bucket, item_id):
     item_id = item_id.upper()
-    if item_id not in state[bucket]:
+    if item_id not in state.setdefault(bucket, {}):
         raise CliError(f"unknown id {item_id}")
     return item_id, state[bucket][item_id]
 
@@ -149,6 +152,35 @@ def _task_line(tid, task):
     return line
 
 
+def open_questions(state):
+    return {q: x for q, x in state.get("questions", {}).items() if x["status"] == "open"}
+
+
+def _question_line(qid, q):
+    blocks = f" | blocks: {','.join(q['blocks'])}" if q.get("blocks") else " | nothing blocked: proceeding on the default"
+    return f"- **{qid}** {q['text']} - recommended default: {q['default']}{blocks}"
+
+
+def milestone_progress(state):
+    """[(id, title, verified, total, complete)] over each milestone's non-dropped criteria."""
+    rows = []
+    for mid, m in state.get("milestones", {}).items():
+        live = [c for c in m["criteria"] if state["criteria"][c]["status"] != "dropped"]
+        ok = [c for c in live if state["criteria"][c]["status"] == "verified"]
+        rows.append((mid, m["title"], len(ok), len(live), bool(live) and len(ok) == len(live)))
+    return rows
+
+
+def _milestone_lines(state):
+    lines, current_marked = [], False
+    for mid, title, ok, total, complete in milestone_progress(state):
+        mark = ""
+        if not complete and not current_marked:
+            mark, current_marked = "  <- current mini-goal", True
+        lines.append(f"- **{mid}** {title} - {ok}/{total} criteria verified ({', '.join(state['milestones'][mid]['criteria']) or 'no criteria yet'}){mark}")
+    return lines
+
+
 def render(state):
     out = [
         "# Project Memory",
@@ -176,6 +208,10 @@ def render(state):
         out.append(f"- **{cid}**{src} {c['text']} - `{c['status']}`{ev}")
     if not state["criteria"]:
         out.append("- _none yet_")
+    if state.get("milestones"):
+        out += ["", "## Milestones (mini-goals, in order)", *_milestone_lines(state)]
+    if open_questions(state):
+        out += ["", "## Waiting on the owner", *[_question_line(q, x) for q, x in open_questions(state).items()]]
     out += ["", "## Tasks"]
     out += [_task_line(t, task) for t, task in state["tasks"].items()] or ["- _none yet_"]
     out += ["", "## Decisions"]
@@ -192,7 +228,20 @@ def render(state):
 # --------------------------------------------------------------------------- #
 # Guards
 # --------------------------------------------------------------------------- #
+def clean_pattern(pattern, strict=True):
+    """One spelling per path: `./src//a.py` and `src/a.py` are the same file to the overlap guard."""
+    raw = pattern.strip().replace("\\", "/")
+    is_dir = raw.endswith("/")
+    cleaned = posixpath.normpath(raw) if raw else ""
+    outside = raw.startswith("/") or re.match(r"^[A-Za-z]:", raw) or cleaned == ".." or cleaned.startswith("../")
+    if strict and (outside or cleaned in ("", ".")):
+        raise CliError(f"--files {pattern!r}: own specific files, globs or directories given relative to the project "
+                       "root (not absolute paths, not paths outside it, not the whole project)")
+    return cleaned + ("/" if is_dir and cleaned not in ("", ".") else "")
+
+
 def _norm(pattern):
+    pattern = clean_pattern(pattern, strict=False)
     return pattern.rstrip("/") + ("/**" if pattern.endswith("/") else "")
 
 
@@ -220,7 +269,10 @@ def owned_files(root, patterns):
         if pattern.endswith("/") or target.is_dir():
             matches = target.rglob("*")
         else:
-            matches = root.glob(pattern)
+            try:
+                matches = list(root.glob(pattern))
+            except (NotImplementedError, ValueError):  # absolute or empty pattern in an older state file
+                continue
         for path in matches:
             if path.is_file() and "__pycache__" not in path.parts and ".supervisor" not in path.parts:
                 found.add(path.relative_to(root).as_posix())
@@ -248,7 +300,7 @@ def metrics(state):
 
 def guard_start(state, tid, task):
     problems = []
-    unmet = [d for d in task.get("depends", []) if state["tasks"][d]["status"] != "verified"]
+    unmet = [d for d in task.get("depends", []) if state["tasks"][d]["status"] not in DEP_MET]
     if unmet:
         problems.append(f"dependencies not verified: {', '.join(unmet)}")
     running = {k: t for k, t in state["tasks"].items() if t["status"] == "running" and k != tid}
@@ -300,17 +352,20 @@ def cmd_criterion(args, directory):
         state = load(directory)
         msgs = []
         if args.action == "add":
+            milestone = get(state, "milestones", args.milestone)[1] if args.milestone else None
             for text in args.items:
                 cid = next_id(state, "AC", "criteria")
                 state["criteria"][cid] = {"text": one_line(text), "status": "pending"}
                 if args.source:
                     state["criteria"][cid]["source"] = one_line(args.source)
+                if milestone is not None:
+                    milestone["criteria"].append(cid)
                 msgs.append(f"{cid} added")
         else:
             targets = [get(state, "criteria", item) for item in args.items]  # validate all first
             if args.action in ("drop", "unverifiable"):
                 status = "dropped" if args.action == "drop" else "unverifiable"
-                if not args.reason:
+                if not (args.reason or "").strip():
                     why = "why this is out of scope" if status == "dropped" else "what is needed to check it"
                     raise CliError(f"`{args.action}` requires --reason ({why})", EXIT_EVIDENCE)
                 for cid, crit in targets:
@@ -320,7 +375,7 @@ def cmd_criterion(args, directory):
                 save(directory, state)
                 print("\n".join(msgs))
                 return
-            if not args.evidence:
+            if not (args.evidence or "").strip():
                 raise CliError(f"`{args.action}` requires --evidence (command + observed result)", EXIT_EVIDENCE)
             for cid, crit in targets:
                 crit["status"] = "verified" if args.action == "verify" else "failed"
@@ -350,7 +405,7 @@ def cmd_task_add(args, directory):
             "owner": one_line(args.owner) if args.owner else None,
             "depends": depends,
             "criteria": criteria,
-            "files": [f.strip() for f in (args.files or "").split(",") if f.strip()],
+            "files": [clean_pattern(f) for f in (args.files or "").split(",") if f.strip()],
             "attempts": [],
             "strategy": None,
         }
@@ -362,7 +417,7 @@ def cmd_task_set(args, directory):
     with locked(directory):
         state = load(directory)
         tid, task = get(state, "tasks", args.id)
-        if args.status == "verified" and not args.evidence:
+        if args.status == "verified" and not (args.evidence or "").strip():
             raise CliError(f"{tid}: `verified` requires --evidence (command + observed result)", EXIT_EVIDENCE)
         if args.owner:
             task["owner"] = one_line(args.owner)
@@ -385,6 +440,11 @@ def cmd_task_set(args, directory):
         state["log"].append({"at": now(), "text": f"{tid} -> {args.status}" + (f" ({one_line(args.note)})" if args.note else "")})
         save(directory, state)
     print(f"{tid} {args.status}")
+    if args.status == "dropped":
+        dependents = [k for k, t in state["tasks"].items() if tid in t.get("depends", []) and t["status"] in OPEN_TASK_STATES]
+        if dependents:
+            print(f"note: {', '.join(dependents)} depended on {tid}; they are no longer held back by it. "
+                  "Check they still make sense without it.")
 
 
 def cmd_task_attempt(args, directory):
@@ -437,6 +497,62 @@ def cmd_simple_add(bucket, prefix):
     return handler
 
 
+def cmd_milestone(args, directory):
+    with locked(directory):
+        state = load(directory)
+        criteria = [c.strip().upper() for c in (args.criteria or "").split(",") if c.strip()]
+        for c in criteria:
+            if c not in state["criteria"]:
+                raise CliError(f"criterion {c} does not exist")
+        mid = next_id(state, "M", "milestones")
+        state["milestones"][mid] = {"title": one_line(args.title), "criteria": criteria, "at": now()}
+        save(directory, state)
+    print(f"{mid} added")
+
+
+def cmd_ask(args, directory):
+    """A question only the owner can answer, with the default the work proceeds on meanwhile."""
+    with locked(directory):
+        state = load(directory)
+        if not args.default.strip():
+            raise CliError("`ask` requires --default: the option you recommend and will assume", EXIT_EVIDENCE)
+        blocks = [get(state, "tasks", t.strip())[0] for t in (args.blocks or "").split(",") if t.strip()]
+        qid = next_id(state, "Q", "questions")
+        state["questions"][qid] = {"text": one_line(args.text), "default": one_line(args.default), "blocks": blocks,
+                                   "status": "open", "at": now()}
+        for tid in blocks:
+            task = state["tasks"][tid]
+            if task["status"] in ("verified", "dropped"):
+                raise CliError(f"{tid} is already {task['status']}: a question cannot block it")
+            task.update(status="blocked", note=f"waiting on {qid}: {one_line(args.text)}")
+        state["log"].append({"at": now(), "text": f"{qid} asked: {one_line(args.text)}"})
+        save(directory, state)
+    print(f"{qid} recorded" + (f"; blocked {', '.join(blocks)}" if blocks else "; nothing blocked: continue on the default"))
+
+
+def cmd_answer(args, directory):
+    with locked(directory):
+        state = load(directory)
+        qid, q = get(state, "questions", args.id)
+        if args.accept == bool(args.text):
+            raise CliError("give the owner's answer, or --accept if they took the recommended default (not both)")
+        if q["status"] != "open":
+            raise CliError(f"{qid} was already answered: {q.get('answer')}. A change of mind is a new `decide`.")
+        q.update(status="answered", answer=q["default"] if args.accept else one_line(args.text), answered=now())
+        did = next_id(state, "D", "decisions")
+        state["decisions"][did] = {"text": f"{q['text']} -> {q['answer']}", "why": f"owner answer to {qid}", "at": now()}
+        freed = []
+        for tid in q.get("blocks", []):
+            task = state["tasks"][tid]
+            still = [o for o, x in open_questions(state).items() if tid in x.get("blocks", [])]
+            if task["status"] == "blocked" and not still:
+                task.update(status="pending", note=f"unblocked by {qid}: {q['answer']}")
+                freed.append(tid)
+        state["log"].append({"at": now(), "text": f"{qid} answered: {q['answer']}"})
+        save(directory, state)
+    print(f"{qid} answered, recorded as {did}" + (f"; unblocked {', '.join(freed)}" if freed else ""))
+
+
 def cmd_next(args, directory):
     with locked(directory):
         state = load(directory)
@@ -463,7 +579,7 @@ def ready_tasks(state):
     return [
         tid
         for tid, t in state["tasks"].items()
-        if t["status"] == "pending" and all(state["tasks"][d]["status"] == "verified" for d in t["depends"])
+        if t["status"] == "pending" and all(state["tasks"][d]["status"] in DEP_MET for d in t["depends"])
     ]
 
 
@@ -495,6 +611,9 @@ def cmd_resume(args, directory):
         f"**Objective:** {state['objective']}",
         f"**Effort so far:** {metrics(state)}",
         "",
+        *((["## Waiting on the owner - ask these once, together, with the defaults; meanwhile do everything not blocked",
+            *[_question_line(q, x) for q, x in open_questions(state).items()], ""]) if open_questions(state) else []),
+        *((["## Milestones (mini-goals, in order)", *_milestone_lines(state), ""]) if state.get("milestones") else []),
         *section("Do not redo - verified and unchanged", [t for t in by("verified") if t not in drifted]),
         "",
         "## Changed since verification - re-verify before relying on these",
@@ -527,6 +646,13 @@ def cmd_resume(args, directory):
 def cmd_gate(args, directory):
     state = load(directory)
     tasks, criteria = state["tasks"], state["criteria"]
+    scope = None
+    if args.milestone:  # judge one mini-goal: its criteria and the tasks that serve them
+        scope, milestone = get(state, "milestones", args.milestone)
+        criteria = {c: criteria[c] for c in milestone["criteria"]}
+        tasks = {t: x for t, x in tasks.items() if set(x.get("criteria", [])) & set(criteria)}
+        if not criteria:
+            raise CliError(f"{scope} has no criteria - add them with `criterion add ... --milestone {scope}`")
     blocked = [(t, x) for t, x in tasks.items() if x["status"] == "blocked"]
     unverified_criteria = [c for c, x in criteria.items() if x["status"] not in ("verified", "dropped")]
     root = project_root(directory)
@@ -546,28 +672,41 @@ def cmd_gate(args, directory):
     # Recorded next actions mean work is still planned. Either it is out-of-scope
     # follow-up (then `next --clear`) or the criteria don't cover the full scope.
     problems += [f"{t} verified, but files changed since: {', '.join(f)} - re-verify" for t, f in drifted.items() if f]
-    problems += [f"next action still recorded: {a} (do it, add it as a task, or `next --clear`)" for a in state["next"]]
+    if scope is None:
+        problems += [f"next action still recorded: {a} (do it, add it as a task, or `next --clear`)" for a in state["next"]]
+    label = f"MILESTONE {scope} " if scope else ""
+    asked = open_questions(state)
     if blocked:
-        print("BLOCKED")
+        print(f"{label}BLOCKED")
         for t, x in blocked:
             print(f"- {t} {x['title']}: {x.get('note') or 'no reason recorded'}")
+        for q, x in asked.items():
+            if set(x.get("blocks", [])) & {t for t, _ in blocked}:
+                print(f"- ask the owner {q}: {x['text']} (recommended: {x['default']})")
         for p in problems:
             print(f"- {p}")
         raise SystemExit(EXIT_BLOCKED)
     if problems:
-        print("PARTIALLY COMPLETE")
+        print(f"{label}PARTIALLY COMPLETE")
         for p in problems:
             print(f"- {p}")
         raise SystemExit(EXIT_PARTIAL)
     dropped = {c: x for c, x in criteria.items() if x["status"] == "dropped"}
     criteria = {c: x for c, x in criteria.items() if x["status"] != "dropped"}
-    print(f"VERIFIED COMPLETE ({len(criteria)} criteria - this verdict covers exactly these; "
-          "confirm they span the whole agreed scope)")
+    if scope:
+        print(f"MILESTONE {scope} VERIFIED ({len(criteria)} criteria). This is one mini-goal: "
+              "only the project `gate` decides completion.")
+    else:
+        assumed = f" on {len(asked)} unconfirmed assumption(s), listed below" if asked else ""
+        print(f"VERIFIED COMPLETE{assumed} ({len(criteria)} criteria - this verdict covers exactly these; "
+              "confirm they span the whole agreed scope)")
     for c, x in criteria.items():
         src = f" [{x['source']}]" if x.get("source") else ""
         print(f"- {c}{src} {x['text']}: {x['evidence']}")
     for c, x in dropped.items():
         print(f"- excluded {c} {x['text']}: {x['reason']}")
+    for q, x in ({} if scope else asked).items():
+        print(f"- assumed, owner has not answered {q}: {x['text']} -> {x['default']}")
     print(f"Effort: {metrics(state)}")
 
 
@@ -663,8 +802,15 @@ def _is_human(rec, text):
     return not text.lstrip().startswith(NOISE_PREFIXES)  # older transcripts carry no origin field
 
 
+def _is_summary(text):
+    """The agent's own summary of everything before a context reset. It lists the user's messages so far:
+    the cheapest index of a long session, and a lead like any other claim."""
+    return SUMMARY_MARK in text[:1500]
+
+
 def parse_session(path):
-    session = {"id": path.stem, "start": None, "end": None, "prompts": [], "claim": None, "skipped": 0}
+    session = {"id": path.stem, "start": None, "end": None, "prompts": [], "claim": None, "skipped": 0,
+               "summaries": []}
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
             try:
@@ -684,7 +830,9 @@ def parse_session(path):
                     session["claim"] = text.strip()
                 continue
             text = SYSTEM_REMINDER.sub("", text).strip()
-            if text and not has_tool_result and _is_human(rec, text):
+            if _is_summary(text):
+                session["summaries"].append((ts, text))
+            elif text and not has_tool_result and _is_human(rec, text):
                 session["prompts"].append((ts, text))
     return session
 
@@ -713,13 +861,16 @@ def load_extra(paths, sessions):
                 skipped += 1
                 continue
             s = by_id.setdefault(sid, {"id": sid, "start": None, "end": None, "prompts": [], "claim": None,
-                                       "skipped": 0, "known": True})
+                                       "skipped": 0, "known": True, "summaries": []})
             kind = rec.get("kind", "prompt")
             if kind == "session":
                 s.update(known=True, title=rec.get("title"), status=rec.get("status"), note=rec.get("note"),
                          start=rec.get("start") or s["start"], end=rec.get("end") or s["end"])
             elif kind == "claim":
                 s["claim"] = str(rec.get("text", "")).strip() or s["claim"]
+            elif kind == "summary":
+                if str(rec.get("text", "")).strip():
+                    s.setdefault("summaries", []).append((rec.get("timestamp") or "", str(rec["text"]).strip()))
             elif str(rec.get("text", "")).strip():
                 ts = rec.get("timestamp") or ""
                 s["prompts"].append((ts, str(rec["text"]).strip()))
@@ -733,7 +884,7 @@ def load_sessions(args):
     project = Path(args.project or Path.cwd()).resolve()
     files, searched = find_transcripts(project, args.transcripts)
     sessions = [parse_session(f) for f in files]
-    sessions = [s for s in sessions if s["prompts"] or s["claim"]]
+    sessions = [s for s in sessions if s["prompts"] or s["claim"] or s["summaries"]]
     sessions, args.extra_skipped = load_extra(getattr(args, "extra", None), sessions)
     for s in sessions:
         s["prompts"].sort(key=lambda p: p[0])
@@ -758,8 +909,10 @@ def cmd_sessions(args, directory):
 def cmd_harvest(args, directory):
     project, sessions, searched = load_sessions(args)
     unread = [s for s in sessions if not s["prompts"]]
-    sessions = [s for s in sessions if s["prompts"]] + [s for s in unread if s["claim"] and not s.get("known")]
-    unread = [s for s in unread if s.get("known")]
+    summarised = [s for s in unread if s.get("summaries")]  # no typed prompt read, but the agent's own summary was
+    sessions = ([s for s in sessions if s["prompts"]] + summarised
+                + [s for s in unread if s["claim"] and not s.get("known") and not s.get("summaries")])
+    unread = [s for s in unread if s.get("known") and not s.get("summaries")]
     skipped = sum(s["skipped"] for s in sessions) + args.extra_skipped
     with_status = [s for s in sessions + unread if s.get("status")]
     tally = {}
@@ -779,6 +932,8 @@ def cmd_harvest(args, directory):
         "## Coverage",
         f"- Searched: {', '.join(searched)}",
         f"- Sessions read: {len(sessions)}; human prompts: {total}; {skipped} unreadable line(s) skipped",
+        *([f"- {len(summarised)} session(s) are covered only by the agent's own continuation summary, not by the "
+           "prompts as typed: wording and anything the summary left out are NOT covered"] if summarised else []),
         *([f"- **{len(unread)} known session(s) whose prompts were not read** (listed below): anything asked only "
            "there is NOT covered by this audit"] if unread else []),
         *([f"- Final status of the {len(with_status)} known session(s): "
@@ -793,8 +948,12 @@ def cmd_harvest(args, directory):
             n += 1
             quoted = "\n".join("> " + line if line else ">" for line in _clip(text, args.max_chars).splitlines())
             out += ["", f"### H{n} - {ts[:16]}", quoted]
+        for ts, text in sorted(s.get("summaries") or [])[-1:]:  # each summary restates the earlier ones
+            quoted = "\n".join("> " + line if line else ">" for line in _clip(text, args.max_summary_chars).splitlines())
+            out += ["", f"**Continuation summary written by the agent at {ts[:16] or '?'}** (a lead, not evidence; "
+                        "its list of user messages is an index of what was asked before that point):", quoted]
         if s["claim"]:
-            claim = "\n".join("> " + line if line else ">" for line in _clip(s["claim"], 1500).splitlines())
+            claim = "\n".join("> " + line if line else ">" for line in _clip(s["claim"], 3000).splitlines())
             out += ["", f"**Final claim at end of session {i}** (a lead, not evidence):", claim]
     if unread:
         cell = lambda v: one_line(redact(str(v or "-"))).replace("|", "/")  # noqa: E731
@@ -846,7 +1005,7 @@ def _messages(node, ts=None):
 
 def cmd_events(args, directory):
     """Turn saved session-event dumps (e.g. large `list_events` results) into --extra lines, copied exactly."""
-    prompts, claim = {}, None
+    prompts, summaries, said = {}, {}, {}
     for path in args.files:
         try:
             raw = Path(path).expanduser().read_text(encoding="utf-8", errors="replace")
@@ -856,22 +1015,32 @@ def cmd_events(args, directory):
             for ts, wrapper, message in _messages(value):
                 text, has_tool_result = _text_of(message["content"])
                 if message["role"] == "assistant":
-                    if text.strip() and (claim is None or (ts or "") >= claim[0]):
-                        claim = (ts or "", text.strip())
+                    if text.strip():
+                        said[(ts or "", len(said))] = text.strip()
                     continue
                 text = SYSTEM_REMINDER.sub("", text).strip()
-                if text and not has_tool_result and "tool_use_result" not in wrapper and _is_human(wrapper, text):
+                if _is_summary(text):
+                    summaries[(ts or "", text)] = None
+                elif text and not has_tool_result and "tool_use_result" not in wrapper and _is_human(wrapper, text):
                     prompts[(ts or "", text)] = None
-    if not prompts and claim is None:
+    # A session that ends in automatic check-ins closes with "nothing changed": keep the last three messages,
+    # so the last real status is not lost behind them.
+    closing = [said[k] for k in sorted(said)][-3:]
+    claim = "\n---\n".join(t[:1400] for t in closing) if closing else None
+    if not prompts and claim is None and not summaries:
         raise CliError("no session events found in the given file(s): expected JSON containing "
                        '{"message": {"role": ..., "content": ...}} objects')
     lines = [json.dumps({"kind": "prompt", "session": args.session, "timestamp": ts, "text": text}, ensure_ascii=False)
              for ts, text in sorted(prompts)]
+    lines += [json.dumps({"kind": "summary", "session": args.session, "timestamp": ts, "text": text}, ensure_ascii=False)
+              for ts, text in sorted(summaries)]
     if claim:
-        lines.append(json.dumps({"kind": "claim", "session": args.session, "text": claim[1][:1500]}, ensure_ascii=False))
+        lines.append(json.dumps({"kind": "claim", "session": args.session, "text": claim}, ensure_ascii=False))
     with open(args.out, "a", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
-    print(f"{len(prompts)} typed prompt(s)" + (" + final claim" if claim else "") + f" for {args.session} -> {args.out}")
+    print(f"{len(prompts)} typed prompt(s)" + (" + final claim" if claim else "")
+          + (f" + {len(summaries)} continuation summary(ies): read the newest before paging further back"
+             if summaries else "") + f" for {args.session} -> {args.out}")
 
 
 def cmd_branches(args, directory):
@@ -884,25 +1053,30 @@ def cmd_branches(args, directory):
     if git("rev-parse", "--git-dir").returncode != 0:
         raise CliError(f"{root} is not a git repository")
     notes = []
+    shallow = lambda: git("rev-parse", "--is-shallow-repository").stdout.strip() == "true"  # noqa: E731
     if args.fetch:
+        if shallow() and git("fetch", "--quiet", "--unshallow", "origin").returncode != 0:
+            notes.append("could not fetch the full history: ahead/behind counts stop at the shallow boundary and "
+                         "are upper bounds, not true counts.")
         fetched = git("fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*")
         if fetched.returncode != 0:
             notes.append(f"fetch failed: {one_line(fetched.stderr)[:160]}")
     default = git("symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD").stdout.strip() \
         or git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    fmt = "%(refname)\t%(committerdate:iso-strict)\t%(subject)"
+    fmt = "%(refname)\t%(committerdate:iso-strict)\t%(subject)\t%(committerdate:unix)"
     refs = {}
     for line in git("for-each-ref", f"--format={fmt}", "refs/remotes", "refs/heads").stdout.splitlines():
-        ref, date, subject = (line.split("\t") + ["", ""])[:3]
+        ref, date, subject, stamp = (line.split("\t") + ["", "", "0"])[:4]
         if ref.endswith("/HEAD"):
             continue
         short = ref.replace("refs/remotes/", "").replace("refs/heads/", "")
         name = short.split("/", 1)[1] if ref.startswith("refs/remotes/") and "/" in short else short
         if ref.startswith("refs/remotes/") or name not in refs:  # prefer the remote's view of a branch
-            refs[name] = (short, date, subject)
+            refs[name] = (short, date, subject, int(stamp) if stamp.isdigit() else 0)
     rows = []
-    for name, (short, date, subject) in refs.items():
-        if short == default:
+    default_name = default.split("/", 1)[1] if default.startswith("origin/") else default
+    for name, (short, date, subject, stamp) in refs.items():
+        if short == default or name == default_name:
             continue
         counts = git("rev-list", "--left-right", "--count", f"{default}...{short}").stdout.split()
         behind, ahead = (int(counts[0]), int(counts[1])) if len(counts) == 2 else (0, 0)
@@ -912,11 +1086,11 @@ def cmd_branches(args, directory):
             state = "merged (same content)"
         else:
             state = "unmerged"
-        rows.append((ahead, behind, name, date, state, subject))
-    rows.sort(key=lambda r: (r[3], r[0]), reverse=True)  # newest first: most commits is not most recent
+        rows.append((ahead, behind, name, date, state, subject, stamp))
+    rows.sort(key=lambda r: (r[6], r[0]), reverse=True)  # newest first (by instant, not by local-time text)
     print(f"default branch: {default}  ({len(rows) + 1} branch(es) known locally)")
     print("| Branch | Ahead | Behind | Last commit | State | Last subject |\n|---|---|---|---|---|---|")
-    for ahead, behind, name, date, state, subject in rows:
+    for ahead, behind, name, date, state, subject, _ in rows:
         print(f"| {name} | {ahead} | {behind} | {date[:10]} | {state} | {one_line(subject)[:60].replace('|', '/')} |")
     unmerged = [r for r in rows if r[4] == "unmerged"]
     if unmerged:
@@ -927,14 +1101,15 @@ def cmd_branches(args, directory):
         print(f"\nLATEST WORK: {top[2]} is {top[0]} commit(s) ahead of {default} (last commit {top[3][:10]}). "
               f"{len(unmerged)} unmerged branch(es).{also} The default branch may not hold the newest state: "
               "audit the latest branch too, and report built-but-unmerged work as unmerged, not as missing.")
-    if git("rev-parse", "--is-shallow-repository").stdout.strip() == "true":
-        notes.append("shallow clone: other branches may not be fetched and counts stop at the shallow boundary. "
-                     "Re-run with --fetch (or --remote to only list what the remote has).")
+    if shallow() and not args.fetch:
+        notes.append("shallow clone: other branches may not be fetched, and ahead/behind counts stop at the shallow "
+                     "boundary, so they can be far too high. Re-run with --fetch for true counts (or --remote to only "
+                     "list what the remote has).")
     if args.remote or len(rows) == 0:
         listed = git("ls-remote", "--heads", "origin")
         if listed.returncode == 0:
             remote = [line.split("refs/heads/", 1)[1] for line in listed.stdout.splitlines() if "refs/heads/" in line]
-            known = {short.split("/", 1)[1] for short, _, _ in refs.values() if short.startswith("origin/")}
+            known = {v[0].split("/", 1)[1] for v in refs.values() if v[0].startswith("origin/")}
             missing = [b for b in remote if b not in known]
             if missing:
                 notes.append(f"{len(missing)} branch(es) on the remote are NOT fetched locally: {', '.join(missing[:30])}"
@@ -965,7 +1140,24 @@ def build_parser():
     s.add_argument("--evidence", help="command run + observed result")
     s.add_argument("--reason", help="drop: why it is out of scope; unverifiable: what is needed to check it")
     s.add_argument("--source", help="where the requirement came from, e.g. H3 (harvest prompt id) or brief.md")
+    s.add_argument("--milestone", help="add: the mini-goal (M#) these criteria belong to")
     s.set_defaults(fn=cmd_criterion)
+
+    s = sub.add_parser("milestone", help="add a mini-goal: an ordered slice of the project with its own gate")
+    s.add_argument("action", choices=("add",))
+    s.add_argument("title", help="the observable outcome of this mini-goal")
+    s.add_argument("--criteria", help="comma-separated existing criterion ids (or use `criterion add --milestone`)")
+    s.set_defaults(fn=cmd_milestone)
+    s = sub.add_parser("ask", help="record a question only the owner can answer, with the default you proceed on")
+    s.add_argument("text")
+    s.add_argument("--default", required=True, help="the option you recommend and assume until answered")
+    s.add_argument("--blocks", help="comma-separated task ids that cannot proceed on the default (they become blocked)")
+    s.set_defaults(fn=cmd_ask)
+    s = sub.add_parser("answer", help="record the owner's answer: becomes a binding decision and unblocks tasks")
+    s.add_argument("id")
+    s.add_argument("text", nargs="?")
+    s.add_argument("--accept", action="store_true", help="the owner accepted the recommended default")
+    s.set_defaults(fn=cmd_answer)
 
     task = sub.add_parser("task", help="manage tasks").add_subparsers(dest="task_cmd", required=True)
     s = task.add_parser("add")
@@ -1014,6 +1206,7 @@ def build_parser():
         s.add_argument("--transcripts", help="folder of session *.jsonl files (default: Claude Code history)")
         s.add_argument("--project", help="project path the sessions ran in (default: current directory)")
         s.add_argument("--max-chars", type=int, default=4000, help="truncate each prompt to this length")
+        s.add_argument("--max-summary-chars", type=int, default=25000, help="truncate a continuation summary to this length")
         s.add_argument("--extra", action="append", metavar="FILE.jsonl",
                        help="sessions collected elsewhere (cloud, other machines); see references/audit.md")
         s.set_defaults(fn=fn)
@@ -1031,9 +1224,11 @@ def build_parser():
         ("status", cmd_status, "print MEMORY.md"),
         ("resume", cmd_resume, "print a resume brief after an interruption"),
         ("ready", cmd_ready, "list pending tasks whose dependencies are verified"),
-        ("gate", cmd_gate, "completion gate: VERIFIED COMPLETE / PARTIALLY COMPLETE / BLOCKED"),
     ):
         sub.add_parser(name, help=text).set_defaults(fn=fn)
+    s = sub.add_parser("gate", help="completion gate: VERIFIED COMPLETE / PARTIALLY COMPLETE / BLOCKED")
+    s.add_argument("--milestone", help="judge one mini-goal (M#) instead of the whole project")
+    s.set_defaults(fn=cmd_gate)
     return p
 
 

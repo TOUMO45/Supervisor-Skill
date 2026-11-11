@@ -6,13 +6,15 @@ requirements get lost.
 
 ## First: which branch holds the latest work?
 
-`$SUP branches` compares every branch with the default one: commits ahead and behind, last commit date,
-merged or not. It names the **most recent unmerged branch** as the latest work. Most commits is not most
+`$SUP branches --fetch` compares every branch with the default one: commits ahead and behind, last commit
+date, merged or not. It names the **most recent unmerged branch** as the latest work. Most commits is not most
 recent: on one real audit a month-old side line was 441 commits ahead, and the real latest work was 284.
 
 - A default cloud or CI checkout is usually shallow and single-branch, so `git branch -a` shows one branch.
-  `branches` asks the remote when it sees no others and lists what is not fetched. `--fetch` brings them in.
-  It updates remote-tracking refs only, so it is safe in a read-only audit.
+  `branches` asks the remote when it sees no others and lists what is not fetched. `--fetch` brings them in
+  **and fetches the full history**: in a shallow clone the counts stop at the cut and are far too high (the
+  same real branch read 640 ahead when shallow and 284 with history). It updates remote-tracking refs only,
+  so it is safe in a read-only audit.
 - Check each requirement on the default branch **and** on the latest branch
   (`git show origin/<branch>:path`, or `git worktree add <scratch dir> origin/<branch>` to run its tests).
 - Report three different things separately: *missing* (on no branch), *built but unmerged* (name the branch
@@ -57,6 +59,16 @@ If the host has session tools (in Claude Code: `list_sessions`, `get_session`, `
 
 The same `--extra` format works for chats the user exports or pastes.
 
+**Read the last page of each session first.** When a long session runs out of context, the agent writes a
+continuation summary, and it usually lists every user message so far. `events` extracts it
+(`{"kind":"summary",...}`) and says so; `harvest` prints the newest one per session as a lead. One page can
+then stand in for hundreds: on one real five-week session the last page alone held a
+22,000-character summary with all 16 user messages. It is the agent's own retelling, so wording can be
+lost and anything it left out is missing: the coverage section says which sessions are covered only this
+way. Page further back only where the exact words matter (the original brief, a disputed requirement) or
+where there is no summary. `events` also keeps the last three assistant messages as the final claim,
+because a session that ends in automatic check-ins closes with "nothing changed", not with its real status.
+
 **Reading a whole long session cheaply (measured on 22 real sessions, 989 pages).** Ask for pages with
 **no kind filter**. An unfiltered page is large, so the host saves it to a file and returns only the path:
 nothing enters the agent's context. Run `events` on each saved file, delete it, and keep the cursor
@@ -64,7 +76,8 @@ nothing enters the agent's context. Run `events` on each saved file, delete it, 
 inline, which is what fills the context. Paging is sequential per session, so run one cheap-model agent per
 session, in parallel, each with a call budget. Give the reading of the extracted prompts to analysts by
 phase, not to yourself. Expect harness text among the "user" events (safety notices, continuation
-summaries, goal check-ins): `events` drops the known kinds, and analysts should list any others as noise.
+summaries, goal check-ins): `events` drops the known kinds (summaries are kept apart, never counted as
+typed prompts), and analysts should list any others as noise.
 
 ## Turning prompts into criteria
 
@@ -95,6 +108,13 @@ summaries, goal check-ins): `events` drops the known kinds, and analysts should 
   `$SUP criterion unverifiable AC# --reason "needs ..."`. It is neither passed nor failed: the gate reports it
   separately and stays at PARTIALLY COMPLETE. Use it also for a claim the project itself has not yet measured
   ("not yet proven" is not "proven false"). A project's own measurements are leads: cite them as *claimed*.
+
+## Questions the project is waiting on
+
+Sessions that ended waiting on the owner leave questions behind, often the same ones re-asked for weeks.
+Record each open one with `$SUP ask "..." --default "<what you recommend>" [--blocks T#]` so it is asked
+once, with a recommendation, and survives the session. Do not answer for the owner: spending, publishing,
+merging and anything the project's own rules reserve stay open until they say so.
 
 ## Reporting
 

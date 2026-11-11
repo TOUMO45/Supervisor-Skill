@@ -7,19 +7,19 @@ description: Use when the user hands over a project to deliver, build, or finish
 
 ## Overview
 
-You are the accountable lead: one objective, focused specialists, shared memory, verified completion. **A report is not proof. Chat is not memory.** The plan, status and evidence live in `.supervisor/`, managed by a CLI: they survive context resets, and the gate decides "complete" instead of you.
+You are the accountable lead: one objective, focused specialists, shared memory, verified completion. **A report is not proof. Chat is not memory.** Plan, status and evidence live in `.supervisor/`, managed by a CLI: they survive context resets, and the gate decides "complete", not you.
 
 ```bash
 SUP="python3 <this skill's base directory>/scripts/supervisor.py"   # stdlib only; --help per command
 ```
 
-Tool calls cost more than CLI work: chain updates with `&&`. `criterion add`/`verify` take several items.
+Chain updates with `&&`; `criterion add`/`verify` take several items.
 
 ## 1. Choose the mode first
 
 | Mode | When | What you do |
 |---|---|---|
-| **Direct** | ≤3 steps, one area, no unknowns (typo, rename, one bugfix) | Do it, verify, report. No memory, no subagents, no templates. |
+| **Direct** | ≤3 steps, one area, no unknowns (typo, rename, one bugfix) | Do it, verify, report. No ceremony. |
 | **Lite** | One session, a handful of mostly sequential tasks | `init`, criteria, `gate`. Do the work yourself. |
 | **Full** | Several milestones, substantial independent tracks, or likely to outlive one context window | Everything below. |
 
@@ -29,14 +29,21 @@ If `.supervisor/state.json` exists, you are **resuming**: run `$SUP resume` firs
 
 1. Inspect what exists (repo, docs, tests, prior memory) **before** asking anything.
 2. Write the brief with `templates/project-brief.md`: outcome, constraints, **explicit assumptions**, and scope (in / optional / excluded).
-3. `$SUP init --objective "..."`, then `$SUP criterion add "..." "..."`. Each criterion must be checkable by a command or an observation. Criteria cover **the whole agreed project, including work deferred to a later session**, because the gate only judges the criteria it knows.
-4. Ask the user only when the answer changes architecture or scope **and** can't be inferred. Ask once, batched, and continue on stated assumptions.
+3. `$SUP init --objective "..."`, then `$SUP criterion add "..." "..."`. Each criterion must be checkable by a command or an observation. Criteria cover **the whole agreed project, including work deferred to a later session**: the gate judges only those.
+4. Ask the user only when the answer changes architecture or scope **and** can't be inferred (§9).
 5. When the brief conflicts with existing code or tests, the brief wins: `$SUP decide "..." --why "..."`.
-6. A user message that adds or changes requirements is recorded **when it arrives**: a `decide --why "user clarification"` plus a criterion. In testing, a fresh session that saw only the brief deleted a feature requested in chat.
+6. A user message that adds or changes requirements is recorded **when it arrives**: a `decide --why "user clarification"` plus a criterion. In testing, a fresh session deleted a feature requested only in chat.
 
 ## 3. Plan
 
-Use `templates/roadmap.md`. Tasks are small, own files, and serve criteria:
+Use `templates/roadmap.md`. Split a big project into ordered **mini-goals**, each an observable outcome with its own criteria; finish one before starting the next:
+
+```bash
+$SUP milestone add "Core parses CSV" && $SUP criterion add "pipes escaped" --milestone M1
+$SUP gate --milestone M1      # this mini-goal only; the project gate still decides "complete"
+```
+
+Tasks are small, own files, and serve criteria:
 
 ```bash
 $SUP task add "CSV parsing core" --criteria AC1,AC2 --files "csvmd/core.py,tests/test_core.py"
@@ -48,49 +55,49 @@ Critical path first; simplest design that works.
 
 ## 4. Delegate, or do it yourself
 
-Only the top-level session can delegate: subagents have no spawn tool. Each subagent costs roughly a fresh context in tokens, so delegate only when it **wins**:
+Only the top-level session can delegate. Each subagent costs a fresh context, so delegate only when it **wins**:
 - independent tracks that are each substantial (more than ~10 tool calls),
 - a large read where you need only the conclusion,
 - a review you want unanchored from your own reasoning.
 
-Otherwise do it yourself. Roles and integration: `references/delegation.md`.
+Otherwise do it yourself. Roles: `references/delegation.md`.
 
-Every brief fills **all** slots of `templates/task-assignment.md` (owned and forbidden files, verification command, escalation conditions, report format). Launch independent agents in one message. Before dispatching:
+Every brief fills **all** slots of `templates/task-assignment.md`. Launch independent agents in one message. Before dispatching:
 
 ```bash
 $SUP task set T2 running --owner "backend-agent"   # guard: deps verified, parallel limit, file overlap
 ```
 
-Exit `3` = a guard tripped: sequence the tasks or split the files (`--force` only with a recorded `decide`). Your own work is `--owner supervisor`: it takes no agent slot, so do it while agents run.
+Exit `3` = a guard tripped: sequence the tasks or split the files (`--force` only with a `decide`). Your own work is `--owner supervisor`: it takes no agent slot.
 
 ## 5. Verify and integrate (a report is a claim)
 
-When a subagent reports "done", run `$SUP task set T2 done`, then run the check **yourself**:
+On a subagent's "done": `$SUP task set T2 done`, then run the check **yourself**:
 
 ```bash
 $SUP task set T2 verified --evidence "test_cli: 9 OK"
 $SUP criterion verify AC1 --evidence "test_pipe_escaped OK; echo 'a|b' | python3 -m csvmd -> a\|b"
 ```
 
-Evidence is specific to *that* criterion: the test or command plus what you observed. A suite total ("29 tests OK") isn't.
+Evidence is specific to *that* criterion: the command plus what you observed, not a suite total.
 
-`verified` fingerprints the task's owned files; later edits get flagged for re-verification by `resume` and `gate`. Re-run a passing check only when flagged. Run targeted checks while building, the full suite at integration points.
+`verified` fingerprints the task's owned files; `resume` and `gate` flag later edits for re-verification. Targeted checks while building; the full suite at integration points.
 
 ## 6. Failures: bounded retries, then change strategy
 
-1. Reproduce the failure and record the evidence. Find the root cause before fixing.
-2. Make one focused fix, then re-verify it and its neighbours.
+1. Reproduce; find the root cause before fixing.
+2. One focused fix; re-verify it and its neighbours.
 3. Log each failed fix: `$SUP task attempt T4 --note "regex tweak: still 404"`.
-4. **RETRY LIMIT** (3 per strategy): no variations of the same idea. Gather new evidence, then `$SUP task strategy T4 "instrument router"`.
+4. **RETRY LIMIT** (3 per strategy): gather new evidence, then `$SUP task strategy T4 "instrument router"`.
 5. **STRATEGY LIMIT** (3 per task): escalate with the evidence log.
 
 Triage playbook: `references/recovery.md`.
 
 ## 7. Memory and resumption
 
-Update memory at milestones, before handoffs, and when context runs low. Keep `$SUP next "..."` current.
+Update memory at milestones, before handoffs, and when context runs low. Keep `$SUP next "..."` current. In an ephemeral container, commit `.supervisor/`.
 
-After an interruption, run `$SUP resume` and act in its order: don't redo *verified and unchanged*; re-verify *changed*; for *in flight*, collect the report or check the agent's files first; verify *done*; recheck *blocked*; start *ready*. Recorded decisions are binding; reversing one takes a new `decide`.
+After an interruption, run `$SUP resume` and act in its order: don't redo *verified and unchanged*; re-verify *changed*; for *in flight*, check the agent's report or files first; verify *done*; recheck *blocked*; start *ready*. Decisions are binding; reversing one takes a new `decide`.
 
 ## 8. Budget and stopping rules
 
@@ -102,11 +109,17 @@ After an interruption, run `$SUP resume` and act in its order: don't redo *verif
 | Delegation depth | 1 | Supervisor splits the task |
 | Scope | Agreed criteria | Stop when the gate passes. Optional ideas go to the user. |
 
-Optimize for the total cost of a correct result, including rework.
-
 ## 9. Escalate rarely, precisely
 
-Escalate only for a decision that changes the outcome, missing access, a scope change, or explicit authorization, using `templates/escalation.md` (blocker, what you tried, the **smallest** decision needed). Mark the task `blocked --note "..."` and continue everything else. Never ask the user to say "continue", relay messages, or repeat what memory holds.
+Escalate only for an outcome-changing decision, missing access, a scope change, or authorization. Record it with the option you recommend:
+
+```bash
+$SUP ask "Postgres or SQLite?" --default "SQLite"              # reversible: continue on the default
+$SUP ask "Spend on the paid API?" --default "no" --blocks T7   # only T7 waits
+$SUP answer Q2 "yes, up to $5"                                 # becomes a decision; unblocks T7
+```
+
+`resume` lists open questions first: ask them once, together (`templates/escalation.md`), and keep working on everything not blocked. Never ask the user to say "continue", relay messages, or repeat what memory holds.
 
 ## 10. Finish honestly
 
@@ -116,25 +129,25 @@ $SUP next --clear   # the gate refuses while next actions remain
 $SUP gate           # 0 VERIFIED COMPLETE | 10 PARTIALLY COMPLETE | 20 BLOCKED
 ```
 
-Report the gate's verdict verbatim with `templates/final-delivery.md` (and `templates/verification-report.md` for consequential integrations). **Never call the work complete when the gate disagrees.**
+Report the gate's verdict verbatim, including any unconfirmed assumptions, with `templates/final-delivery.md` (and `templates/verification-report.md` for consequential integrations). **Never call the work complete when the gate disagrees.**
 
 ## 11. Audit an existing project
 
-What was *asked* lives in past conversations, and the newest work may not be on the branch you have.
+What was *asked* lives in past conversations; the newest work may be on another branch.
 
-1. `$SUP branches`: every branch against the default one. Run it **first**. A default checkout often hides branches (it warns; `--fetch` gets them). Work that exists on an unmerged branch is **unmerged, not missing**: audit the latest branch too.
-2. `$SUP harvest` finds this project's past Claude Code sessions itself and writes every human prompt (H1…Hn) plus each session's final claim to `.supervisor/harvest.md`, secrets redacted, git-ignored. Sessions held elsewhere (cloud, other machines) are merged with `--extra`; exit `5` or a short list is **not** proof there is no history. See `references/audit.md`.
+1. `$SUP branches --fetch` **first**: every branch against the default one. A default checkout hides branches and inflates counts. Work on an unmerged branch is **unmerged, not missing**: audit the latest branch too.
+2. `$SUP harvest` finds this project's past Claude Code sessions itself and writes every human prompt (H1…Hn) plus each session's final claim to `.supervisor/harvest.md`, secrets redacted, git-ignored. Sessions held elsewhere (cloud, other machines) are merged with `--extra`: read each one's **last page first**, since it may hold a summary listing every earlier user message. Exit `5` or a short list is **not** proof there is no history. See `references/audit.md`.
 3. For each requirement: `$SUP criterion add "..." --source H#`. A later prompt that overrides an earlier one is a `decide`.
-4. Verify each criterion against the code **as it is now**. Old "done" claims and passing tests are leads. If it can't be checked here (needs credentials, a service, paid runs): `$SUP criterion unverifiable AC# --reason "needs ..."`. Never `fail` or `verify` it.
-5. Run `gate`; report with `templates/audit-report.md`, including **coverage**: what was read and what wasn't. Never say "100% complete" while a source is uncovered.
+4. Verify each criterion against the code **as it is now**; old "done" claims and passing tests are leads. If it can't be checked here (credentials, a service, paid runs): `$SUP criterion unverifiable AC# --reason "needs ..."`, never `fail` or `verify`.
+5. Run `gate`; report with `templates/audit-report.md`, including **coverage** (what was and wasn't read). Never say "100% complete" while a source is uncovered.
 
 ## Host adaptation
 
 | Missing | Fallback, stated plainly |
 |---|---|
-| Subagents (including when *you* are a subagent) | Run the tracks sequentially and label them that way. Never claim parallelism. |
-| Script execution, or the CLI exits `4` (sandboxed / read-only shell) | **Before you finish**, write progress to `.supervisor/MANUAL.md` with your file-writing tool, following `templates/memory.md`. The CLI never overwrites it, and `resume` shows it. Apply the guards yourself and say the gate is manual. |
-| Persistence | Print the memory at milestones for the user to save and paste back. |
+| Subagents (or *you* are one) | Run the tracks sequentially and say so. |
+| Script execution, or the CLI exits `4` (read-only shell) | **Before you finish**, write progress to `.supervisor/MANUAL.md` following `templates/memory.md`; `resume` shows it. Apply the guards yourself and say the gate is manual. |
+| Persistence | Print the memory at milestones for the user to save. |
 
 Details: `references/host-adaptation.md`.
 
@@ -145,5 +158,6 @@ Details: `references/host-adaptation.md`.
 - Redoing work that `resume` lists as verified and unchanged.
 - Fanning out to subagents for tracks of a few tool calls each.
 - Saying "complete" while `gate` exits non-zero.
-- A user requirement that exists only in chat.
+- A user requirement, or a question for the owner, that exists only in chat.
+- Ending a session blocked while unblocked work remains.
 - Calling work "missing" without checking other branches.
