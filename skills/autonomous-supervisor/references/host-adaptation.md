@@ -11,6 +11,15 @@ Detect capabilities from the tools you actually have; never assume them.
 ## Fallback rules (say them, don't hide them)
 
 - **No subagents:** "This host can't run subagents, so I'll run the three tracks sequentially in this session." Label sections "Track 1 (sequential)". Offer self-contained briefs the user can run in separate sessions if they want true parallelism.
-- **No script execution:** keep `.supervisor/MEMORY.md` by hand with `templates/memory.md` and enforce the guards manually.
+- **Shell cannot write the project** (sandboxed shell; the CLI exits `4`): journal mode. The CLI checks the step
+  against the guards as usual, then prints one JSON line instead of saving. Append that exact line to
+  `.supervisor/journal.jsonl` with your file-writing tool and continue. Do not chain updates with `&&` there: each
+  command only sees lines already in the file. Put several updates in one call instead,
+  `$SUP batch "task set T1 verified --evidence '...'" "criterion verify AC1 --evidence '...'"`, and append all the
+  lines it prints in one write. A batch is all or nothing and keeps every guard. `resume`, `status` and `gate` replay the
+  journal, so the plan, the guards and the completion gate are the real ones. `MEMORY.md` lags until a shell
+  can write; the first command there folds the journal in and removes it. Commit `journal.jsonl` like the rest.
+- **No script execution at all:** keep `.supervisor/MANUAL.md` by hand with `templates/memory.md`, enforce the
+  guards yourself and say the gate is manual.
 - **No persistence:** at each milestone print the memory block and say: "Save this; paste it at the start of the next session to resume."
 - **Token/time metrics unavailable:** use proxies - tool calls, agents spawned, retries - and report them in the delivery.

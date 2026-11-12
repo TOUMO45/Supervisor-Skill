@@ -10,7 +10,7 @@ Exit codes
   1   usage or input error
   2   evidence, reason or recommended default missing (claims and questions must carry one)
   3   guard tripped (dependency, parallel limit, file overlap, retry limit)
-  4   memory directory not writable (sandbox / read-only filesystem) - use the manual fallback
+  4   read-only shell: the step is valid but was not saved - append the printed line to journal.jsonl
   5   harvest/sessions: no session transcripts found for this project
   10  gate: PARTIALLY COMPLETE
   20  gate: BLOCKED
@@ -26,6 +26,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -66,8 +67,21 @@ def state_dir():
     return Path(os.environ.get("SUPERVISOR_DIR", ".supervisor"))
 
 
+# Journal mode. Some hosts run shell commands in a sandbox that cannot write the project (the agent's file tool
+# still can). There the CLI cannot save, so each change is handed back as one line for the agent to append to
+# .supervisor/journal.jsonl. Every later command replays the journal over state.json, so guards, `resume` and
+# `gate` keep working on the true state. The first command in a writable shell folds the journal back in.
+_REPLAY = None   # {"state": ...} while a journal line is being re-applied in memory
+_CLOCK = None    # the recorded time of the line being replayed
+_PRINTS = None   # fingerprints recorded with the line being replayed (files may have changed since)
+
+
+class ReadOnlyState(Exception):
+    """The change is valid but could not be saved: the caller hands it to the agent as a journal line."""
+
+
 def now():
-    return _dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+    return _CLOCK or _dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
 
 
 def one_line(text):
@@ -77,26 +91,73 @@ def one_line(text):
 
 @contextlib.contextmanager
 def locked(directory):
-    directory.mkdir(parents=True, exist_ok=True)
-    lock_path = directory / ".lock"
-    with open(lock_path, "a+") as handle:
-        if fcntl:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+    handle = None
+    if _REPLAY is None:
         try:
-            yield
-        finally:
+            directory.mkdir(parents=True, exist_ok=True)
+            handle = open(directory / ".lock", "a+")
+            if fcntl:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+        except OSError:  # read-only shell: no lock is possible, and no other writer can get in either
+            handle = None
+    try:
+        yield
+    finally:
+        if handle is not None:
             if fcntl:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+            handle.close()
+
+
+def journal_lines(directory):
+    path = directory / "journal.jsonl"
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+            if isinstance(rec, dict) and isinstance(rec.get("argv"), list):
+                out.append(rec)
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def replay(directory, state):
+    """Re-apply journal lines not yet folded into state.json, in memory. An invalid line changes nothing."""
+    global _REPLAY, _CLOCK, _PRINTS
+    lines = journal_lines(directory)
+    for rec in lines[(state or {}).get("journal_folded", 0):]:
+        _REPLAY, _CLOCK, _PRINTS = {"state": state}, rec.get("at"), rec.get("fingerprint")
+        try:
+            with contextlib.redirect_stdout(None), contextlib.redirect_stderr(None):
+                args = build_parser().parse_args([str(a) for a in rec["argv"]])
+                args.fn(args, directory)
+        except (CliError, SystemExit, KeyError, AssertionError):
+            pass
+        finally:
+            state, _REPLAY, _CLOCK, _PRINTS = _REPLAY["state"], None, None, None
+    return state, len(lines)
 
 
 def load(directory):
+    if _REPLAY is not None:
+        if _REPLAY["state"] is None:
+            raise CliError("no project yet")
+        return _REPLAY["state"]
     path = directory / "state.json"
-    if not path.exists():
+    state = None
+    if path.exists():
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise CliError(f"{path} is corrupt ({exc}); restore it from git") from exc
+    state, total = replay(directory, state)
+    if state is None:
         raise CliError(f"no project at {directory}/ - run `supervisor.py init --objective ...` first")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise CliError(f"{path} is corrupt ({exc}); restore it from git") from exc
+    state["_journal_total"] = total
+    return state
 
 
 def atomic_write(path, text):
@@ -112,10 +173,30 @@ def atomic_write(path, text):
 
 
 def save(directory, state):
+    global _REPLAY
     state["updated"] = now()
     state["cli"] = str(Path(__file__).resolve())  # lets a fresh agent find the CLI from the memory alone
-    atomic_write(directory / "state.json", json.dumps(state, indent=2, ensure_ascii=False) + "\n")
-    atomic_write(directory / "MEMORY.md", render(state))
+    if _REPLAY is not None:
+        _REPLAY["state"] = state
+        return
+    total = state.pop("_journal_total", 0)
+    journal = directory / "journal.jsonl"
+    try:
+        if os.environ.get("SUPERVISOR_READONLY"):  # treat the shell as read-only (tests; hosts that discard writes)
+            raise OSError(30, "Read-only file system")
+        directory.mkdir(parents=True, exist_ok=True)
+        if total:
+            state["journal_folded"] = total       # these journal lines are now part of state.json
+        atomic_write(directory / "state.json", json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+        atomic_write(directory / "MEMORY.md", render(state))
+        if not (directory / ".gitignore").exists():  # memory is committed; the lock and the raw harvest are not
+            atomic_write(directory / ".gitignore", ".lock\nharvest.md\n")
+        if total:
+            journal.unlink()
+            state.pop("journal_folded", None)
+            atomic_write(directory / "state.json", json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        raise ReadOnlyState(str(exc.strerror or exc)) from exc
 
 
 def next_id(state, prefix, bucket):
@@ -195,12 +276,14 @@ def render(state):
         "",
         f"_Updated {state['updated']} - generated by supervisor.py; edit via the CLI, not by hand._",
         "",
-        "> **Resuming this project?** Load the `autonomous-supervisor` skill, then run "
+        "> **Resuming this project?** FIRST load the `autonomous-supervisor` skill (Skill tool): its rules are not "
+        "in this file, and the CLI alone does not give them to you. Then run "
         "`python3 <skill directory>/scripts/supervisor.py resume` before doing anything else "
         f"(on the machine that last wrote this file the CLI was at `{state.get('cli') or 'supervisor.py'}`; "
         "on another machine use the skill's own copy). "
-        "Verified work and recorded decisions below are binding. If the CLI cannot write (exit 4), record "
-        "progress in `.supervisor/MANUAL.md` instead - the CLI never overwrites it and `resume` shows it.",
+        "Verified work and recorded decisions below are binding. If the CLI cannot write (exit 4), append the "
+        "line it prints to `.supervisor/journal.jsonl` with your file tool; a journal next to this file holds "
+        "steps newer than this page (`resume` reads both).",
         "",
         f"**Objective:** {state['objective']}",
         "",
@@ -290,6 +373,8 @@ def owned_files(root, patterns):
 
 
 def fingerprint(root, patterns):
+    if _PRINTS is not None:  # replaying: the fingerprint taken when the step was really done
+        return dict(_PRINTS)
     return {rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()[:16] for rel in owned_files(root, patterns)}
 
 
@@ -335,8 +420,14 @@ def guard_start(state, tid, task):
 # Commands
 # --------------------------------------------------------------------------- #
 def cmd_init(args, directory):
-    if (directory / "state.json").exists():
-        raise CliError(f"{directory}/state.json already exists - use `resume` instead of re-initialising")
+    if _REPLAY is not None and _REPLAY["state"] is not None:
+        raise CliError("already initialised")
+    if _REPLAY is None:
+        existing = None
+        with contextlib.suppress(CliError):
+            existing = load(directory)
+        if existing is not None:
+            raise CliError(f"{directory}/state.json already exists - use `resume` instead of re-initialising")
     state = {
         "schema": SCHEMA_VERSION,
         "objective": one_line(args.objective),
@@ -354,8 +445,6 @@ def cmd_init(args, directory):
     }
     with locked(directory):
         save(directory, state)
-        if not (directory / ".gitignore").exists():  # memory is committed; the lock and the raw harvest are not
-            atomic_write(directory / ".gitignore", ".lock\nharvest.md\n")
     print(f"initialised {directory}/ (state.json + MEMORY.md)")
 
 
@@ -442,6 +531,7 @@ def cmd_task_set(args, directory):
             state["dispatches"] = state.get("dispatches", 0) + 1
         if args.status == "verified":
             task["fingerprint"] = fingerprint(project_root(directory), task.get("files", []))
+            args.recorded_fingerprint = task["fingerprint"]
         task["status"] = args.status
         if args.owner:
             task["owner"] = one_line(args.owner)
@@ -576,6 +666,45 @@ def cmd_answer(args, directory):
     print(f"{qid} answered, recorded as {did}" + (f"; unblocked {', '.join(freed)}" if freed else ""))
 
 
+READ_ONLY_COMMANDS = ("status", "resume", "ready", "gate", "sessions", "harvest", "events", "branches", "batch")
+
+
+def cmd_batch(args, directory):
+    """Several updates in one call, all or nothing. In a read-only shell this returns all their journal lines at
+    once, so a milestone costs two tool calls instead of two per step."""
+    global _REPLAY
+    parser = build_parser()
+    with locked(directory):
+        state = None
+        with contextlib.suppress(CliError):
+            state = load(directory)
+        total = state.pop("_journal_total", 0) if state else len(journal_lines(directory))
+        records = []
+        for text in args.commands:
+            argv = shlex.split(text)
+            try:
+                with contextlib.redirect_stderr(None):
+                    sub = parser.parse_args(argv)
+            except SystemExit:
+                raise CliError(f"batch: cannot parse `{text}` - nothing was saved") from None
+            if sub.command in READ_ONLY_COMMANDS:
+                raise CliError(f"batch takes updates only, not `{sub.command}` - nothing was saved")
+            _REPLAY = {"state": state}
+            try:
+                sub.fn(sub, directory)
+            except CliError as exc:
+                raise CliError(f"batch stopped at `{text}`: {exc} - nothing was saved", exc.code) from exc
+            finally:
+                state, _REPLAY = _REPLAY["state"], None
+            rec = {"at": now(), "argv": argv}
+            if getattr(sub, "recorded_fingerprint", None) is not None:
+                rec["fingerprint"] = sub.recorded_fingerprint
+            records.append(rec)
+        args.batch_records = records
+        state["_journal_total"] = total
+        save(directory, state)
+
+
 def cmd_next(args, directory):
     with locked(directory):
         state = load(directory)
@@ -631,13 +760,16 @@ def cmd_resume(args, directory):
     open_criteria = [c for c, x in state["criteria"].items() if x["status"] not in ("verified", "dropped")]
     out = [
         f"# Resume brief ({state['updated']})",
+        "_This brief assumes the `autonomous-supervisor` skill is loaded. If you have not loaded it in this session, "
+        "load it now (Skill tool) before acting: the rules for what you may redo, edit and claim are there._",
         f"**Objective:** {state['objective']}",
         f"**Effort so far:** {metrics(state)}",
         "",
         *((["## Waiting on the owner - ask these once, together, with the defaults; meanwhile do everything not blocked",
             *[_question_line(q, x) for q, x in open_questions(state).items()], ""]) if open_questions(state) else []),
         *((["## Milestones (mini-goals, in order)", *_milestone_lines(state), ""]) if state.get("milestones") else []),
-        *section("Do not redo - verified and unchanged", [t for t in by("verified") if t not in drifted]),
+        *section("Do not redo - verified and unchanged (leave their files alone: an edit there must be re-verified "
+                 "and recorded)", [t for t in by("verified") if t not in drifted]),
         "",
         "## Changed since verification - re-verify before relying on these",
         *([f"- **{t}** {tasks[t]['title']}: {', '.join(files)}" for t, files in drifted.items()] or ["- none"]),
@@ -1286,6 +1418,9 @@ def build_parser():
         ("ready", cmd_ready, "list pending tasks whose dependencies are verified"),
     ):
         sub.add_parser(name, help=text).set_defaults(fn=fn)
+    s = sub.add_parser("batch", help="several updates in one call, all or nothing (each argument is one command line)")
+    s.add_argument("commands", nargs="+", help='e.g. "task set T1 verified --evidence \'test_core OK\'" "criterion verify AC1 --evidence ..."')
+    s.set_defaults(fn=cmd_batch)
     s = sub.add_parser("gate", help="completion gate: VERIFIED COMPLETE / PARTIALLY COMPLETE / BLOCKED")
     s.add_argument("--milestone", help="judge one mini-goal (M#) instead of the whole project")
     s.set_defaults(fn=cmd_gate)
@@ -1294,8 +1429,26 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
     try:
         args.fn(args, state_dir())
+    except ReadOnlyState as exc:
+        if args.command in ("harvest",):
+            raise OSError(str(exc)) from exc
+        rec = {"at": now(), "argv": raw}
+        if getattr(args, "recorded_fingerprint", None) is not None:
+            rec["fingerprint"] = args.recorded_fingerprint
+        lines = getattr(args, "batch_records", None) or [rec]
+        print(
+            f"READ-ONLY SHELL ({exc}): valid, but this shell cannot save it. Append exactly these {len(lines)} line(s) to "
+            f"{state_dir()}/journal.jsonl with your file-writing tool (create the file if needed), then go on. The "
+            "next command only sees lines already in the file, so do not chain updates with `&&` here: put several "
+            "in one `batch \"cmd\" \"cmd\"` call and append all its lines at once. `resume`, `status` and `gate` read "
+            "the journal, so the guards and the gate still work; MEMORY.md is refreshed when a shell can write.\n"
+            + "\n".join(json.dumps(r, ensure_ascii=False) for r in lines),
+            file=sys.stderr,
+        )
+        return EXIT_UNWRITABLE
     except CliError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return exc.code

@@ -1,6 +1,6 @@
 {
   "name": "autonomous-supervisor",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Turns an agent into an accountable senior team lead: plans from a brief, delegates to specialist subagents, keeps durable project memory, enforces bounded retries and file ownership, and only reports 'complete' when a verification gate passes.",
   "author": {
     "name": "Kamari Fatima Zuhra"

@@ -161,12 +161,12 @@ skills/autonomous-supervisor/
 │                               # escalation, final-delivery, memory (manual fallback)
 └── references/                 # delegation rules, recovery procedures, host adaptation, audit mode
 tests/
-├── test_supervisor_cli.py      # 110 behavioural tests of the CLI (incl. concurrency, harvest, branches)
+├── test_supervisor_cli.py      # 117 behavioural tests of the CLI (incl. concurrency, harvest, branches)
 ├── validate_skill.py           # structural lint (frontmatter, links, word budget)
 ├── scenarios/                  # 8 pressure scenarios + recorded results
 └── e2e/                        # benchmark briefs, seeded starter, hidden acceptance oracles,
                                 #   reference implementations (csvmd, parallel/textkit)
-evals/                          # `claude plugin eval` suite: 4 outcome + 7 trigger cases,
+evals/                          # `claude plugin eval` suite: 7 outcome + 8 trigger cases,
                                 #   with-plugin vs no-plugin arms
 .claude-plugin/                 # plugin + marketplace manifests
 ```
@@ -207,7 +207,7 @@ Sonnet 5.5, and anyone can reproduce them with one command.
 | **Discovery:** did the skill fire on its own? | **0/6.** Earlier benchmarks *told* agents to read SKILL.md, so discovery was never tested | Description rewritten using a trigger micro-eval: **0.57 → 1.00** (fires on 8/8 project prompts, stays quiet on typo and question prompts) |
 | Brief + handoff prompt | 0/4 | **6/6** |
 | "Continue the interrupted project" | 1/4 | **8/9.** `MEMORY.md` now describes itself (names the skill and the exact `resume` command) |
-| Sandboxed or read-only shell | Raw `OSError`; progress unrecorded (0/2) | CLI exits `4` with a fallback; progress kept in `MANUAL.md` (**3/3**) |
+| Sandboxed or read-only shell | Raw `OSError` (v1.0), then hand-written `MANUAL.md` with the guards and gate unused (v1.1-v1.5) | **Journal mode (v1.6):** the CLI validates each step and hands back one line to append; guards and gate keep working. 22 of 22 sandboxed runs used it |
 | `gate-honesty` ("workers say done") | baseline 0.75 | **1.00** with the skill (Δ +0.25) |
 
 The single-session outcome cases otherwise tie at 1.00 in both arms. Sonnet 5.5 handles them
