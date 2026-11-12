@@ -90,7 +90,7 @@ Reproduce, find the root cause, make one focused fix, re-verify. Log each failed
 - **RETRY LIMIT** (3 per strategy): gather new evidence, then `$SUP task strategy T4 "instrument router"`.
 - **STRATEGY LIMIT** (3 per task): escalate with the evidence log.
 
-Triage playbook: `references/recovery.md`.
+Playbook: `references/recovery.md`.
 
 ## 7. Memory and resumption
 
@@ -118,7 +118,7 @@ $SUP ask "Run the paid benchmark?" --default "no" --blocks T7 --because spend   
 $SUP answer Q2 "yes, up to $5"                                                    # becomes a decision; unblocks T7
 ```
 
-Ask blocked questions once, together (`templates/escalation.md`). While `gate` or `resume` says **NOT A STOPPING POINT**, keep working. Never ask the user to say "continue". Research, debugging, dry runs and efficiency: `references/engineering.md`. Read it when starting Full mode.
+Ask blocked questions once, together (`templates/escalation.md`). While `gate` or `resume` says **NOT A STOPPING POINT**, keep working. Research, debugging, dry runs and efficiency: `references/engineering.md`. Read it when starting Full mode.
 
 ## 10. Finish honestly
 
@@ -145,8 +145,9 @@ What was *asked* lives in past conversations; the newest work may be on another 
 | Missing | Fallback, stated plainly |
 |---|---|
 | Subagents (or *you* are one) | Run the tracks sequentially and say so. |
-| Script execution, or the CLI exits `4` (read-only shell) | **Before you finish**, write progress to `.supervisor/MANUAL.md` following `templates/memory.md`; `resume` shows it. Apply the guards yourself and say the gate is manual. |
-| Persistence | Print the memory for the user to save. |
+| A writable shell (CLI exits `4`) | Append the line it prints to `.supervisor/journal.jsonl` with your file tool, one command at a time. Guards and `gate` still work. |
+| Script execution | Keep `.supervisor/MANUAL.md` by hand (`templates/memory.md`); say the gate is manual. |
+| Persistence | Print the memory. |
 
 More: `references/host-adaptation.md`.
 

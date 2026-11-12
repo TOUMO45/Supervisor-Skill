@@ -400,6 +400,13 @@ class TestSelfDescribingMemory(CliTestCase):
         self.assertIn("autonomous-supervisor", memory)
         # the instruction must work on a machine where the recorded path does not exist (found on a fresh clone)
         self.assertIn("<skill directory>/scripts/supervisor.py resume", memory)
+        self.assertIn("FIRST load the `autonomous-supervisor` skill", memory)
+        # an agent that skips the skill and goes straight to the CLI (seen in evals: 2 of 3 runs) is told again
+        self.run_cli("task", "add", "core", "--files", "a.py")
+        self.run_cli("task", "set", "T1", "verified", "--evidence", "ok")
+        resume = self.run_cli("resume").stdout
+        self.assertIn("load it now (Skill tool) before acting", resume)
+        self.assertIn("leave their files alone", resume)
         self.assertIn(f"`{CLI.resolve()}`", memory)
         self.assertIn("on another machine use the skill's own copy", memory)
 
@@ -409,19 +416,22 @@ class TestSelfDescribingMemory(CliTestCase):
 
 
 class TestUnwritableMemory(CliTestCase):
-    """Eval sandbox made the workspace read-only to the shell: the CLI died with a raw OSError."""
+    """Eval sandbox made the workspace read-only to the shell: the CLI died with a raw OSError (v1.1), then fell
+    back to hand-written notes (v1.1-v1.5), which meant the guards and the gate were never used there."""
 
-    def test_unwritable_state_dir_gives_actionable_error_not_traceback(self):
+    def blocked(self, *args):
         blocker = self.dir / "not-a-dir"
         blocker.write_text("x")
-        proc = subprocess.run(
-            [sys.executable, str(CLI), "init", "--objective", "x"], cwd=self.dir,
-            capture_output=True, text=True, env={**os.environ, "SUPERVISOR_DIR": str(blocker / "sub")},
-        )
+        return subprocess.run([sys.executable, str(CLI), *args], cwd=self.dir, capture_output=True, text=True,
+                              env={**os.environ, "SUPERVISOR_DIR": str(blocker / "sub")})
+
+    def test_unwritable_state_dir_gives_actionable_error_not_traceback(self):
+        proc = self.blocked("init", "--objective", "x")
         self.assertEqual(proc.returncode, 4, proc.stderr)
         self.assertNotIn("Traceback", proc.stderr)
-        self.assertIn("cannot write", proc.stderr)
-        self.assertIn("templates/memory.md", proc.stderr)
+        self.assertIn("READ-ONLY SHELL", proc.stderr)
+        self.assertIn("journal.jsonl", proc.stderr)
+        self.assertEqual(json.loads(proc.stderr.strip().splitlines()[-1])["argv"], ["init", "--objective", "x"])
 
     def test_manual_notes_survive_rerender_and_are_shown_on_resume(self):
         self.init()
@@ -432,16 +442,101 @@ class TestUnwritableMemory(CliTestCase):
         out = self.run_cli("resume").stdout
         self.assertIn("Manual notes", out)
         self.assertIn("T2 verified by hand", out)
-        self.assertIn("MANUAL.md", (self.dir / ".supervisor" / "MEMORY.md").read_text())
+        self.assertIn("journal.jsonl", (self.dir / ".supervisor" / "MEMORY.md").read_text())
 
-    def test_unwritable_error_points_to_manual_notes_file(self):
-        blocker = self.dir / "not-a-dir"
-        blocker.write_text("x")
-        proc = subprocess.run(
-            [sys.executable, str(CLI), "init", "--objective", "x"], cwd=self.dir,
-            capture_output=True, text=True, env={**os.environ, "SUPERVISOR_DIR": str(blocker / "sub")},
-        )
-        self.assertIn("MANUAL.md", proc.stderr)
+
+class TestJournalMode(CliTestCase):
+    """A shell that cannot write must not switch the supervisor off. Each step comes back as one line; the agent
+    appends it with its file tool; every later command replays the journal, so guards and the gate still hold."""
+
+    def ro(self, *args, expect=4):
+        """Run in a read-only shell and append the returned line, as the agent's file tool would."""
+        proc = subprocess.run([sys.executable, str(CLI), *args], cwd=self.dir, capture_output=True, text=True,
+                              env={**os.environ, "SUPERVISOR_READONLY": "1"})
+        self.assertEqual(proc.returncode, expect, f"{args}\n{proc.stdout}\n{proc.stderr}")
+        if proc.returncode == 4:
+            line = proc.stderr.strip().splitlines()[-1]
+            json.loads(line)
+            journal = self.dir / ".supervisor" / "journal.jsonl"
+            journal.parent.mkdir(exist_ok=True)
+            with open(journal, "a") as handle:
+                handle.write(line + "\n")
+        return proc
+
+    def read(self, *args, expect=0):
+        proc = subprocess.run([sys.executable, str(CLI), *args], cwd=self.dir, capture_output=True, text=True,
+                              env={**os.environ, "SUPERVISOR_READONLY": "1"})
+        self.assertEqual(proc.returncode, expect, proc.stdout + proc.stderr)
+        return proc.stdout
+
+    def test_a_whole_project_runs_from_the_journal_alone(self):
+        self.ro("init", "--objective", "Ship csvmd")
+        self.assertFalse((self.dir / ".supervisor" / "state.json").exists())
+        self.ro("criterion", "add", "pipes escaped", "CLI works")
+        self.ro("task", "add", "core", "--criteria", "AC1", "--files", "core.py")
+        self.ro("task", "add", "cli", "--criteria", "AC2", "--depends", "T1")
+        resume = self.read("resume")
+        self.assertIn("Ship csvmd", resume)
+        self.assertIn("**T1** core", resume)
+        gate = self.read("gate", expect=10)
+        self.assertIn("AC1 not verified (pending): pipes escaped", gate)
+        (self.dir / "core.py").write_text("x = 1\n")
+        self.ro("task", "set", "T1", "verified", "--evidence", "test_core OK")
+        self.ro("criterion", "verify", "AC1", "--evidence", "echo 'a|b' -> a\\|b")
+        self.ro("task", "set", "T2", "verified", "--evidence", "test_cli OK")
+        self.ro("criterion", "verify", "AC2", "--evidence", "python3 -m csvmd x.csv -> table")
+        self.assertIn("VERIFIED COMPLETE (2 criteria", self.read("gate"))
+
+    def test_guards_still_trip_in_a_read_only_shell(self):
+        self.ro("init", "--objective", "x")
+        self.ro("task", "add", "core")
+        self.ro("task", "add", "cli", "--depends", "T1")
+        proc = self.ro("task", "set", "T2", "running", "--owner", "agent", expect=3)
+        self.assertIn("dependencies not verified: T1", proc.stderr)
+        self.ro("task", "set", "T1", "verified", expect=2)                    # evidence still required
+        self.assertEqual(len((self.dir / ".supervisor" / "journal.jsonl").read_text().splitlines()), 3)
+
+    def test_drift_is_detected_against_the_fingerprint_taken_when_the_step_was_done(self):
+        (self.dir / "core.py").write_text("v1\n")
+        self.ro("init", "--objective", "x")
+        self.ro("criterion", "add", "works")
+        self.ro("task", "add", "core", "--criteria", "AC1", "--files", "core.py")
+        self.ro("task", "set", "T1", "verified", "--evidence", "ok")
+        self.ro("criterion", "verify", "AC1", "--evidence", "ok")
+        self.assertIn("VERIFIED COMPLETE", self.read("gate"))
+        (self.dir / "core.py").write_text("v2 - edited after verification\n")
+        self.assertIn("T1 verified, but files changed since: core.py", self.read("gate", expect=10))
+
+    def test_first_writable_shell_folds_the_journal_in_and_removes_it(self):
+        self.ro("init", "--objective", "x")
+        self.ro("criterion", "add", "works")
+        self.ro("decide", "use SQLite", "--why", "no server")
+        self.run_cli("log", "back in a writable shell")
+        journal = self.dir / ".supervisor" / "journal.jsonl"
+        self.assertFalse(journal.exists())
+        st = self.state()
+        self.assertEqual(st["objective"], "x")
+        self.assertEqual(list(st["criteria"]), ["AC1"])
+        self.assertEqual(st["decisions"]["D1"]["text"], "use SQLite")
+        self.assertNotIn("journal_folded", st)
+        self.assertNotIn("_journal_total", st)
+        self.run_cli("criterion", "add", "second")           # nothing is applied twice
+        self.assertEqual(list(self.state()["criteria"]), ["AC1", "AC2"])
+
+    def test_journal_on_top_of_an_existing_state_file(self):
+        self.init()
+        self.run_cli("criterion", "add", "first")
+        self.ro("criterion", "add", "second")
+        self.assertIn("AC2", self.read("status"))
+        self.assertEqual(list(self.state()["criteria"]), ["AC1"])            # the file itself is untouched
+        self.ro("init", "--objective", "again", expect=1)                    # still refuses to re-initialise
+
+    def test_a_mangled_journal_line_is_skipped_not_fatal(self):
+        self.ro("init", "--objective", "x")
+        with open(self.dir / ".supervisor" / "journal.jsonl", "a") as handle:
+            handle.write("{not json\n" + json.dumps({"argv": ["task", "set", "T9", "done"]}) + "\n")
+        self.ro("criterion", "add", "works")
+        self.assertIn("AC1", self.read("status"))
 
 
 # --------------------------------------------------------------------------- #
