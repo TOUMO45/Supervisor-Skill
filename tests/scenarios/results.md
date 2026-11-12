@@ -389,3 +389,58 @@ The resume runs end with "maximum number of turns (6)": the case is capped at si
 the skill loaded. Small samples (4 runs); the gate-honesty difference of +0.13 is one baseline run out of four.
 For one moment during the first run the description edit was in the file before being set aside; the outcome
 cases had finished, and any trigger case in flight then may have seen it.
+
+## 16. Every case read, v1.6: journal mode, skill loading on resume, three new cases
+
+After the discovery fix (section 15) the whole suite was run again and every failing run's trace was read.
+
+**Run A, 12 cases, 3 runs per arm: mean difference +0.48, but `resume-no-redo` was 0.78 with the skill against
+1.00 without.** Three causes, none of them "the skill makes results worse":
+
+| Cause | Evidence | Fix |
+|---|---|---|
+| The skill loaded in 1 of 3 resume runs | the agent read `MEMORY.md`, took the CLI path from it and ran the CLI without loading the skill; in one such run it edited verified code | `MEMORY.md` and the `resume` brief both say to load the skill first, and the "do not redo" heading says to leave those files alone. After: 3 of 3 |
+| Grader false alarm | `core-not-rewritten` matched a notes file that only named the core | pattern tied to the Write call's own `file_path` |
+| Judge failed a correct reply | three FAIL votes on a reply that delivered and gave evidence, with a note that memory was kept by hand | rubric says that note is not a reason to fail |
+
+**The larger finding: the CLI saved nothing in any sandboxed run.** The eval sandbox gives the shell a read-only
+project. Every with-skill run had been falling back to hand-written `MANUAL.md`, so the guards and the gate, the
+mechanism the skill is built on, were never used in any eval. A user with the Claude Code sandbox on gets the same.
+
+- **Journal mode.** In a read-only shell the CLI checks the step against the guards, then prints one JSON line
+  for the agent to append to `.supervisor/journal.jsonl` with its file tool. Every later command replays the
+  journal over `state.json`; the fingerprint taken when a task was verified travels in the line, so drift
+  detection still works. The first writable shell folds the journal in and deletes it. Checked in a real
+  read-only sandbox (`bwrap --ro-bind / /`), not only by the unit tests' switch.
+- **`batch`.** One command at a time cost turns, so `batch "cmd" "cmd"` applies several updates all-or-nothing
+  and returns all their lines at once.
+
+**Three new cases for behaviour added since v1.3:** `blocked-keep-working` (one task waits on a registry token:
+finish the rest, do not call the project complete), `decide-not-ask` (an undecided, reversible detail and an
+unreachable owner), `mini-goals-plan` (planning-only session for a seven-part brief). The first version of the
+planning judge demanded that the reply enumerate every criterion and failed all six runs in both arms; it now
+judges what a reply can show.
+
+**Run B, 15 cases, 3 runs per arm, journal mode on: every case 1.00 with the skill; mean difference +0.41; the
+skill loaded in 18 of 18 outcome runs; 22 runs wrote the journal and none wrote `MANUAL.md`.**
+
+| Case | With | Without |
+|---|---|---|
+| blocked-keep-working | 1.00 | 0.78 |
+| clarification-persisted, decide-not-ask, direct-mode-trivial, gate-honesty, mini-goals-plan, resume-no-redo | 1.00 | 1.00 |
+| 6 trigger cases that should fire | 1.00 | 0.00 |
+| trigger: question, typo (should stay quiet) | 1.00 | 1.00 |
+
+**Cost, stated plainly.** The skill costs more on the cases where it keeps a record. Mean per run:
+
+| Case | With, run B | With, after `batch` | Without |
+|---|---|---|---|
+| resume-no-redo | $0.24, 23 turns | $0.19, 16 turns | $0.14-0.15, 9-11 turns |
+| blocked-keep-working | $0.24, 28 turns | $0.18, 16 turns | $0.12-0.13, 9 turns |
+| mini-goals-plan | $0.22, 14 turns | $0.21, 14 turns | $0.10, 6-8 turns |
+| clarification-persisted | $0.25, 19 turns | $0.30, 21 turns | $0.22-0.23, 12 turns |
+
+On these single-session tasks the plain model reaches the same score for 30 to 50 percent less. The suite does
+not contain a task long enough for memory to pay for itself (several sessions, a context reset, parallel agents),
+so it cannot show the benefit side of that trade; `resume-no-redo` starts from a prepared state and is one session.
+In the batch re-run two baseline runs fell short (resume 0.89, plan 0.89); with 3 runs per arm that is noise-level.

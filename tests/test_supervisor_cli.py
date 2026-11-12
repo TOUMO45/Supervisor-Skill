@@ -531,6 +531,36 @@ class TestJournalMode(CliTestCase):
         self.assertEqual(list(self.state()["criteria"]), ["AC1"])            # the file itself is untouched
         self.ro("init", "--objective", "again", expect=1)                    # still refuses to re-initialise
 
+    def test_batch_returns_all_lines_at_once_in_a_read_only_shell(self):
+        (self.dir / "core.py").write_text("x\n")
+        proc = subprocess.run(
+            [sys.executable, str(CLI), "batch", "init --objective 'Ship csvmd'", "criterion add 'pipes escaped' 'CLI works'",
+             "task add core --criteria AC1 --files core.py", "task set T1 verified --evidence 'test_core: 6 OK'",
+             "criterion verify AC1 --evidence 'echo a|b -> escaped'"],
+            cwd=self.dir, capture_output=True, text=True, env={**os.environ, "SUPERVISOR_READONLY": "1"})
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+        lines = [l for l in proc.stderr.splitlines() if l.startswith("{")]
+        self.assertEqual(len(lines), 5)
+        self.assertIn("fingerprint", json.loads(lines[3]))
+        (self.dir / ".supervisor").mkdir(exist_ok=True)
+        (self.dir / ".supervisor" / "journal.jsonl").write_text("\n".join(lines) + "\n")
+        gate = self.read("gate", expect=10)
+        self.assertIn("AC2 not verified (pending): CLI works", gate)
+        self.assertNotIn("AC1 not verified", gate)
+
+    def test_batch_is_all_or_nothing_and_keeps_the_guards(self):
+        self.init()
+        self.run_cli("task", "add", "core")
+        self.run_cli("task", "add", "cli", "--depends", "T1")
+        proc = self.run_cli("batch", "decide 'use argparse' --why stdlib", "task set T2 running --owner agent", expect=3)
+        self.assertIn("batch stopped at", proc.stderr)
+        self.assertIn("nothing was saved", proc.stderr)
+        self.assertEqual(self.state()["decisions"], {})
+        self.run_cli("batch", "gate", expect=1)
+        self.run_cli("batch", "task set T1 verified --evidence 'ok'", "task set T2 running --owner agent")
+        st = self.state()
+        self.assertEqual((st["tasks"]["T1"]["status"], st["tasks"]["T2"]["status"]), ("verified", "running"))
+
     def test_a_mangled_journal_line_is_skipped_not_fatal(self):
         self.ro("init", "--objective", "x")
         with open(self.dir / ".supervisor" / "journal.jsonl", "a") as handle:

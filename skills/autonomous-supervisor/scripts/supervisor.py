@@ -26,6 +26,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -663,6 +664,45 @@ def cmd_answer(args, directory):
         state["log"].append({"at": now(), "text": f"{qid} answered: {q['answer']}"})
         save(directory, state)
     print(f"{qid} answered, recorded as {did}" + (f"; unblocked {', '.join(freed)}" if freed else ""))
+
+
+READ_ONLY_COMMANDS = ("status", "resume", "ready", "gate", "sessions", "harvest", "events", "branches", "batch")
+
+
+def cmd_batch(args, directory):
+    """Several updates in one call, all or nothing. In a read-only shell this returns all their journal lines at
+    once, so a milestone costs two tool calls instead of two per step."""
+    global _REPLAY
+    parser = build_parser()
+    with locked(directory):
+        state = None
+        with contextlib.suppress(CliError):
+            state = load(directory)
+        total = state.pop("_journal_total", 0) if state else len(journal_lines(directory))
+        records = []
+        for text in args.commands:
+            argv = shlex.split(text)
+            try:
+                with contextlib.redirect_stderr(None):
+                    sub = parser.parse_args(argv)
+            except SystemExit:
+                raise CliError(f"batch: cannot parse `{text}` - nothing was saved") from None
+            if sub.command in READ_ONLY_COMMANDS:
+                raise CliError(f"batch takes updates only, not `{sub.command}` - nothing was saved")
+            _REPLAY = {"state": state}
+            try:
+                sub.fn(sub, directory)
+            except CliError as exc:
+                raise CliError(f"batch stopped at `{text}`: {exc} - nothing was saved", exc.code) from exc
+            finally:
+                state, _REPLAY = _REPLAY["state"], None
+            rec = {"at": now(), "argv": argv}
+            if getattr(sub, "recorded_fingerprint", None) is not None:
+                rec["fingerprint"] = sub.recorded_fingerprint
+            records.append(rec)
+        args.batch_records = records
+        state["_journal_total"] = total
+        save(directory, state)
 
 
 def cmd_next(args, directory):
@@ -1378,6 +1418,9 @@ def build_parser():
         ("ready", cmd_ready, "list pending tasks whose dependencies are verified"),
     ):
         sub.add_parser(name, help=text).set_defaults(fn=fn)
+    s = sub.add_parser("batch", help="several updates in one call, all or nothing (each argument is one command line)")
+    s.add_argument("commands", nargs="+", help='e.g. "task set T1 verified --evidence \'test_core OK\'" "criterion verify AC1 --evidence ..."')
+    s.set_defaults(fn=cmd_batch)
     s = sub.add_parser("gate", help="completion gate: VERIFIED COMPLETE / PARTIALLY COMPLETE / BLOCKED")
     s.add_argument("--milestone", help="judge one mini-goal (M#) instead of the whole project")
     s.set_defaults(fn=cmd_gate)
@@ -1395,12 +1438,14 @@ def main(argv=None):
         rec = {"at": now(), "argv": raw}
         if getattr(args, "recorded_fingerprint", None) is not None:
             rec["fingerprint"] = args.recorded_fingerprint
+        lines = getattr(args, "batch_records", None) or [rec]
         print(
-            f"READ-ONLY SHELL ({exc}): the step is valid but this shell cannot save it. Append exactly this one line to "
-            f"{state_dir()}/journal.jsonl with your file-writing tool (create the file if needed), then go on. One "
-            "command at a time: the next command only sees lines already in the file. `resume`, `status` and `gate` "
-            "read the journal, so the guards and the gate still work; MEMORY.md is refreshed when a shell can write.\n"
-            + json.dumps(rec, ensure_ascii=False),
+            f"READ-ONLY SHELL ({exc}): valid, but this shell cannot save it. Append exactly these {len(lines)} line(s) to "
+            f"{state_dir()}/journal.jsonl with your file-writing tool (create the file if needed), then go on. The "
+            "next command only sees lines already in the file, so do not chain updates with `&&` here: put several "
+            "in one `batch \"cmd\" \"cmd\"` call and append all its lines at once. `resume`, `status` and `gate` read "
+            "the journal, so the guards and the gate still work; MEMORY.md is refreshed when a shell can write.\n"
+            + "\n".join(json.dumps(r, ensure_ascii=False) for r in lines),
             file=sys.stderr,
         )
         return EXIT_UNWRITABLE

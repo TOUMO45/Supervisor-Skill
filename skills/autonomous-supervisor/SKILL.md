@@ -13,7 +13,7 @@ You are the accountable lead: one objective, focused specialists, shared memory,
 SUP="python3 <this skill's base directory>/scripts/supervisor.py"   # stdlib only; --help per command
 ```
 
-Chain updates with `&&`; `criterion add`/`verify` take several items.
+Chain updates with `&&`; `criterion add`/`verify` take several.
 
 ## 1. Choose the mode first
 
@@ -145,8 +145,8 @@ What was *asked* lives in past conversations; the newest work may be on another 
 | Missing | Fallback, stated plainly |
 |---|---|
 | Subagents (or *you* are one) | Run the tracks sequentially and say so. |
-| A writable shell (CLI exits `4`) | Append the line it prints to `.supervisor/journal.jsonl` with your file tool, one command at a time. Guards and `gate` still work. |
-| Script execution | Keep `.supervisor/MANUAL.md` by hand (`templates/memory.md`); say the gate is manual. |
+| A writable shell (CLI exits `4`) | Append the lines it prints to `.supervisor/journal.jsonl` with your file tool. No `&&` chains there: use `$SUP batch "cmd" "cmd"`. Guards and `gate` still work. |
+| Script execution | Keep `.supervisor/MANUAL.md` by hand (`templates/memory.md`); the gate is manual. |
 | Persistence | Print the memory. |
 
 More: `references/host-adaptation.md`.
