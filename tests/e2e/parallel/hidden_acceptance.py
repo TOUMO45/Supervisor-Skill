@@ -26,7 +26,9 @@ def run(args, stdin=""):
 def out_ok(args, stdin, expected):
     p = run(args, stdin)
     assert p.returncode == 0, f"exit {p.returncode}: {p.stderr.decode()[:200]}"
-    got = p.stdout.decode("utf-8")
+    # Windows programs print CRLF: line endings are not what this benchmark measures (found in pilot W1, where
+    # correct projects scored 5/21 on Windows for this reason alone).
+    got = p.stdout.decode("utf-8").replace("\r\n", "\n")
     assert got == expected, f"got {got!r} expected {expected!r}"
 
 

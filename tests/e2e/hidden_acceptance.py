@@ -37,7 +37,7 @@ def check(name):
 
 def expect_stdout(args, stdin, expected):
     p = run(args, stdin)
-    out = p.stdout.decode("utf-8", "replace")
+    out = p.stdout.decode("utf-8", "replace").replace("\r\n", "\n")  # CRLF from Windows programs is not a defect
     assert p.returncode == 0, f"exit {p.returncode}: {p.stderr.decode()[:200]}"
     assert out.rstrip("\n") == expected.rstrip("\n"), f"got:\n{out}\nexpected:\n{expected}"
 
