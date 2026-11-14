@@ -135,6 +135,21 @@ efficient is in [`references/engineering.md`](skills/autonomous-supervisor/refer
 Why: auditing a real five-week project showed 14 of its 22 sessions ended waiting on the owner, and the
 same questions were asked again in later sessions because nothing had recorded them.
 
+### Proof the tool produces itself, and a guard on the quality bar (v1.7)
+
+```bash
+$SUP criterion verify AC1 --run "python3 -m unittest tests.test_cli"   # the tool runs it and records exit + output
+$SUP gate --recheck          # runs every recorded check again, then judges
+$SUP guard                   # skipped or deleted tests, removed assertions, silenced checkers, stubs in the diff
+```
+
+Evidence typed by an agent is the agent's word. With `--run` the tool executes the check, so a failing check
+cannot be marked verified, and the gate prints how many criteria rest on a tool-run check and how many on a
+statement. In a git project the gate also refuses while the diff contains a move that lowers the bar, unless it is
+accepted with a reason. The planning rules (vertical slices, task size, a standing Definition of Done) and the
+bar-guard idea follow [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) (MIT); what this skill
+adds is enforcement by the CLI.
+
 ### The memory CLI at a glance
 
 ```bash
@@ -161,7 +176,7 @@ skills/autonomous-supervisor/
 │                               # escalation, final-delivery, memory (manual fallback)
 └── references/                 # delegation rules, recovery procedures, host adaptation, audit mode
 tests/
-├── test_supervisor_cli.py      # 117 behavioural tests of the CLI (incl. concurrency, harvest, branches)
+├── test_supervisor_cli.py      # 130 behavioural tests of the CLI (incl. concurrency, harvest, branches)
 ├── validate_skill.py           # structural lint (frontmatter, links, word budget)
 ├── scenarios/                  # 8 pressure scenarios + recorded results
 └── e2e/                        # benchmark briefs, seeded starter, hidden acceptance oracles,

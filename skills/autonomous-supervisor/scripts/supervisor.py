@@ -74,6 +74,7 @@ def state_dir():
 _REPLAY = None   # {"state": ...} while a journal line is being re-applied in memory
 _CLOCK = None    # the recorded time of the line being replayed
 _PRINTS = None   # fingerprints recorded with the line being replayed (files may have changed since)
+_REC = None      # other results recorded with the line: a check's exit and output, accepted guard findings
 
 
 class ReadOnlyState(Exception):
@@ -126,10 +127,10 @@ def journal_lines(directory):
 
 def replay(directory, state):
     """Re-apply journal lines not yet folded into state.json, in memory. An invalid line changes nothing."""
-    global _REPLAY, _CLOCK, _PRINTS
+    global _REPLAY, _CLOCK, _PRINTS, _REC
     lines = journal_lines(directory)
     for rec in lines[(state or {}).get("journal_folded", 0):]:
-        _REPLAY, _CLOCK, _PRINTS = {"state": state}, rec.get("at"), rec.get("fingerprint")
+        _REPLAY, _CLOCK, _PRINTS, _REC = {"state": state}, rec.get("at"), rec.get("fingerprint"), rec.get("recorded") or {}
         try:
             with contextlib.redirect_stdout(None), contextlib.redirect_stderr(None):
                 args = build_parser().parse_args([str(a) for a in rec["argv"]])
@@ -137,7 +138,7 @@ def replay(directory, state):
         except (CliError, SystemExit, KeyError, AssertionError):
             pass
         finally:
-            state, _REPLAY, _CLOCK, _PRINTS = _REPLAY["state"], None, None, None
+            state, _REPLAY, _CLOCK, _PRINTS, _REC = _REPLAY["state"], None, None, None, None
     return state, len(lines)
 
 
@@ -387,6 +388,156 @@ def drift(root, task):
     return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
 
 
+def run_check(command, root, timeout=600):
+    """Run a verification command in the project and report what happened. This is the difference between
+    "the agent says it passes" and "it passed when the tool ran it"."""
+    if _REC is not None and "ran" in _REC:  # replaying a journal line: the result recorded when it really ran
+        return dict(_REC["ran"])
+    started = _dt.datetime.now()
+    try:
+        proc = subprocess.run(command, shell=True, cwd=str(root), capture_output=True, text=True, timeout=timeout,
+                              errors="replace")
+        code, text = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired as exc:
+        code, text = 124, f"timed out after {timeout}s\n" + str(exc.stdout or "")[-400:]
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    return {"exit": code, "seconds": round((_dt.datetime.now() - started).total_seconds(), 1),
+            "tail": redact(one_line(" | ".join(lines[-2:])))[:300]}
+
+
+# The quality-bar guard. An agent that meets a red check tends to take the cheapest road to green: silence the
+# checker, skip or delete the test, strip the assertion, leave a stub. These are visible in the diff. The five
+# moves and the diff-scoped approach follow "constraint-driven-development" in addyosmani/agent-skills (MIT).
+GUARD_SUPPRESS = re.compile(r"@ts-ignore|@ts-nocheck|eslint-disable|biome-ignore|#\s*noqa|#\s*type:\s*ignore|"
+                            r"#\s*pragma:\s*no cover|istanbul ignore|nosemgrep|gitleaks:allow|Stryker disable|"
+                            r"@SuppressWarnings|#\[allow\(|//\s*nolint")
+GUARD_STUB = re.compile(r"[Nn]ot ?[Ii]mplemented|catch\s*(\(\w*\))?\s*\{\s*\}|except[^:]*:\s*pass\b|\bTODO\b|\bFIXME\b")
+GUARD_SKIP = re.compile(r"\.(skip|todo|only)\b|\bxit\(|\bxdescribe\(|@pytest\.mark\.(skip|xfail)|@unittest\.skip|"
+                        r"\bt\.Skip\(|@Disabled|@Ignore\b|\bskipTest\(")
+GUARD_ASSERT = re.compile(r"\b(expect|assert\w*|should)\b")
+GUARD_TEST_FILE = re.compile(r"(^|/)(tests?|__tests__|spec)/|\.(test|spec)\.|_test\.|(^|/)test_[^/]*$")
+GUARD_PROSE = re.compile(r"\.(md|txt|rst|adoc)$")
+
+
+def git_out(root, *argv):
+    proc = subprocess.run(["git", "-C", str(root), *argv], capture_output=True, text=True, errors="replace")
+    return proc.stdout if proc.returncode in (0, 1) and (proc.returncode == 0 or argv[0] == "diff") else None
+
+
+def guard_findings(root, base):
+    """[(rule, file, text)] for every bar-lowering move between `base` and the working tree, or None when the
+    guard cannot run (not a repository, unknown base). None must never read as clean."""
+    diff = git_out(root, "diff", "--unified=0", base, "--")
+    untracked = git_out(root, "ls-files", "--others", "--exclude-standard")
+    if diff is None or untracked is None:
+        return None
+    added, removed, deleted = [], [], []
+    current, old, header = "", "", False
+    for line in diff.splitlines():
+        if line.startswith("diff "):
+            header = True
+        elif line.startswith("@@"):
+            header = False
+        elif header:
+            if line.startswith("--- "):
+                old = re.sub(r"^[ab]/", "", line[4:])
+            elif line.startswith("+++ "):
+                new = re.sub(r"^[ab]/", "", line[4:])
+                current = old if new == "/dev/null" else new
+                if new == "/dev/null":
+                    deleted.append(current)
+        elif line.startswith("+"):
+            added.append((current, line[1:]))
+        elif line.startswith("-"):
+            removed.append((current, line[1:]))
+    for name in filter(None, untracked.splitlines()):
+        path = Path(root) / name
+        with contextlib.suppress(OSError, UnicodeDecodeError):
+            if path.is_file() and path.stat().st_size < 1_000_000:
+                added += [(name, text) for text in path.read_text(encoding="utf-8").splitlines()]
+    skip = lambda f: f.startswith(".supervisor/") or GUARD_PROSE.search(f)  # noqa: E731
+    found = []
+    for f, text in added:
+        if skip(f):
+            continue
+        if GUARD_SUPPRESS.search(text):
+            found.append(("checker silenced", f, text))
+        if GUARD_STUB.search(text):
+            found.append(("unfinished work", f, text))
+        if GUARD_TEST_FILE.search(f) and GUARD_SKIP.search(text):
+            found.append(("test skipped", f, text))
+    found += [("test file deleted", f, "file deleted") for f in deleted if GUARD_TEST_FILE.search(f)]
+    for f, text in removed:
+        if GUARD_TEST_FILE.search(f) and f not in deleted and GUARD_ASSERT.search(text) and not skip(f):
+            # an assertion that was only edited (the same file adds one back) is not a removed assertion
+            if not any(g == f and GUARD_ASSERT.search(t) for g, t in added):
+                found.append(("assertion removed", f, text))
+    seen, out = set(), []
+    for rule, f, text in found:
+        key = (rule, f, redact(one_line(text))[:120])
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def guard_key(finding):
+    return " | ".join(finding)
+
+
+def open_guard_findings(state, root):
+    """(findings not yet accepted, or None if the guard cannot run; the base it used)."""
+    base = state.get("base_commit")
+    if not base:
+        return [], None
+    found = guard_findings(root, base)
+    if found is None:
+        return None, base
+    accepted = set(state.get("guard_accepted", []))
+    return [f for f in found if guard_key(f) not in accepted], base
+
+
+def cmd_guard(args, directory):
+    with locked(directory):
+        state = load(directory)
+        root = project_root(directory)
+        if args.base:
+            state["base_commit"] = args.base
+        if not state.get("base_commit"):
+            raise CliError("the guard needs a base commit to compare with: this project was not started inside a git "
+                           "repository. Pass --base <commit or branch> once.")
+        if _REC is not None and "accepted" in _REC:
+            found = [tuple(k.split(" | ", 2)) for k in _REC["accepted"]]
+        else:
+            found, _ = open_guard_findings(state, root)
+        if found is None:
+            raise CliError(f"the guard could not run (git cannot diff against {state['base_commit']}). "
+                           "This is not a clean result.")
+        if args.accept:
+            if not (args.reason or "").strip():
+                raise CliError("`guard --accept` requires --reason: why lowering the bar here is right", EXIT_EVIDENCE)
+            keys = [guard_key(f) for f in found]
+            args.recorded = {"accepted": keys}
+            state.setdefault("guard_accepted", []).extend(k for k in keys if k not in state["guard_accepted"])
+            did = next_id(state, "D", "decisions")
+            state["decisions"][did] = {"text": f"Accepted {len(keys)} quality-bar finding(s): " + "; ".join(keys)[:400],
+                                       "why": one_line(args.reason), "at": now()}
+            save(directory, state)
+            print(f"{len(keys)} finding(s) accepted, recorded as {did}")
+            return
+        if args.base:
+            save(directory, state)
+    if not found:
+        print(f"guard: clean against {state['base_commit'][:12]} (no silenced checker, skipped or deleted test, "
+              "removed assertion or unfinished stub in the changes)")
+        return
+    print(f"guard: {len(found)} move(s) that lower the quality bar since {state['base_commit'][:12]}:")
+    for rule, f, text in found:
+        print(f"- {rule}: {f}: {text}")
+    print("Fix each one. If one is right, record why: `guard --accept --reason \"...\"`. The gate refuses while any stand.")
+    args.post_exit = EXIT_GUARD
+
+
 def metrics(state):
     tasks = state["tasks"].values()
     return (f"dispatches: {state.get('dispatches', 0)} | failed attempts: {sum(len(t['attempts']) for t in tasks)}"
@@ -443,6 +594,10 @@ def cmd_init(args, directory):
         "next": [],
         "log": [{"at": now(), "text": "project initialised"}],
     }
+    base = (_REC or {}).get("base") if _REC is not None else (git_out(project_root(directory), "rev-parse", "HEAD") or "").strip()
+    if base:
+        state["base_commit"] = base  # what the quality-bar guard compares the work with
+        args.recorded = {"base": base}
     with locked(directory):
         save(directory, state)
     print(f"initialised {directory}/ (state.json + MEMORY.md)")
@@ -476,14 +631,30 @@ def cmd_criterion(args, directory):
                 save(directory, state)
                 print("\n".join(msgs))
                 return
-            if not (args.evidence or "").strip():
-                raise CliError(f"`{args.action}` requires --evidence (command + observed result)", EXIT_EVIDENCE)
+            ran = None
+            if args.run:
+                if args.action != "verify":
+                    raise CliError("--run belongs to `criterion verify`: the tool runs the check and records what it saw")
+                ran = run_check(args.run, project_root(directory), args.timeout)
+                args.recorded = {"ran": ran}
+            elif not (args.evidence or "").strip():
+                raise CliError(f"`{args.action}` requires --run \"<command>\" (the tool runs it) or --evidence "
+                               "(command + observed result)", EXIT_EVIDENCE)
             for cid, crit in targets:
-                crit["status"] = "verified" if args.action == "verify" else "failed"
-                crit["evidence"] = one_line(args.evidence)
+                if ran:
+                    crit["status"] = "verified" if ran["exit"] == 0 else "failed"
+                    crit["evidence"] = (f"tool ran `{one_line(args.run)}` -> exit {ran['exit']} in {ran['seconds']}s: "
+                                        f"{ran['tail']}" + (f" ({one_line(args.evidence)})" if args.evidence else ""))
+                    crit["check"] = one_line(args.run)
+                else:
+                    crit["status"] = "verified" if args.action == "verify" else "failed"
+                    crit["evidence"] = one_line(args.evidence)
+                    crit.pop("check", None)
                 crit["at"] = now()
                 state["log"].append({"at": now(), "text": f"{cid} {crit['status']}: {crit['evidence']}"})
-                msgs.append(f"{cid} {crit['status']}")
+                msgs.append(f"{cid} {crit['status']}" + (f": {crit['evidence']}" if ran else ""))
+            if ran and ran["exit"] != 0:
+                args.post_exit = EXIT_GUARD
         save(directory, state)
     print("\n".join(msgs))
 
@@ -699,6 +870,10 @@ def cmd_batch(args, directory):
             rec = {"at": now(), "argv": argv}
             if getattr(sub, "recorded_fingerprint", None) is not None:
                 rec["fingerprint"] = sub.recorded_fingerprint
+            if getattr(sub, "recorded", None):
+                rec["recorded"] = sub.recorded
+            if getattr(sub, "post_exit", 0):
+                args.post_exit = sub.post_exit
             records.append(rec)
         args.batch_records = records
         state["_journal_total"] = total
@@ -854,8 +1029,22 @@ def cmd_gate(args, directory):
         problems += [f"next action still recorded: {a} (do it, add it as a task, or `next --clear`)" for a in state["next"]]
     label = f"MILESTONE {scope} " if scope else ""
     asked = open_questions(state)
+    if args.recheck:  # run every recorded check again now: a check that passed last week proves nothing today
+        for c, x in criteria.items():
+            if x["status"] == "verified" and x.get("check"):
+                ran = run_check(x["check"], root, args.timeout)
+                if ran["exit"] != 0:
+                    problems.append(f"{c} check fails now: `{x['check']}` -> exit {ran['exit']}: {ran['tail']} "
+                                    f"(fix it, then `criterion verify {c} --run \"{x['check']}\"`)")
     if scope is None:
         problems += roadmap_gaps(state)
+        lowered, base = open_guard_findings(state, root)
+        if lowered is None:
+            problems.append(f"the quality-bar guard could not run against {base[:12]} (run `guard` to see why); "
+                            "an unchecked diff is not a clean one")
+        else:
+            problems += [f"quality bar lowered - {rule}: {f}: {text} (fix it, or `guard --accept --reason \"...\"`)"
+                         for rule, f, text in lowered]
     # Work that nothing holds back. While any exists, a blocked or partial verdict is not a reason to stop.
     movable = [t for t in ready_tasks(state) if t in tasks] + [t for t, x in tasks.items() if x["status"] in ("running", "done")]
     if blocked:
@@ -892,6 +1081,11 @@ def cmd_gate(args, directory):
         print(f"- excluded {c} {x['text']}: {x['reason']}")
     for q, x in ({} if scope else asked).items():
         print(f"- assumed, owner has not answered {q}: {x['text']} -> {x['default']}")
+    by_tool = [c for c, x in criteria.items() if x.get("check")]
+    print(f"Proof: {len(by_tool)} of {len(criteria)} criteria rest on a check the tool ran itself"
+          + (f"; {len(criteria) - len(by_tool)} rest on the agent's own statement "
+             f"({', '.join(c for c in criteria if c not in by_tool)})" if len(by_tool) < len(criteria) else "")
+          + ("" if args.recheck or not by_tool else ". `gate --recheck` runs them again now"))
     if scope is None:
         done_m = [m for m in milestone_progress(state) if m[4]]
         live_tasks = [t for t in tasks.values() if t["status"] != "dropped"]
@@ -1331,6 +1525,9 @@ def build_parser():
     s.add_argument("--reason", help="drop: why it is out of scope; unverifiable: what is needed to check it")
     s.add_argument("--source", help="where the requirement came from, e.g. H3 (harvest prompt id) or brief.md")
     s.add_argument("--milestone", help="add: the mini-goal (M#) these criteria belong to")
+    s.add_argument("--run", metavar="COMMAND", help="verify: the tool runs this check itself and records exit code and "
+                   "output; exit 0 verifies, anything else marks the criterion failed (exit 3)")
+    s.add_argument("--timeout", type=int, default=600, help="seconds allowed for --run (default 600)")
     s.set_defaults(fn=cmd_criterion)
 
     s = sub.add_parser("milestone", help="add a mini-goal: an ordered slice of the project with its own gate")
@@ -1421,7 +1618,14 @@ def build_parser():
     s = sub.add_parser("batch", help="several updates in one call, all or nothing (each argument is one command line)")
     s.add_argument("commands", nargs="+", help='e.g. "task set T1 verified --evidence \'test_core OK\'" "criterion verify AC1 --evidence ..."')
     s.set_defaults(fn=cmd_batch)
+    s = sub.add_parser("guard", help="quality-bar guard: bar-lowering moves in the diff since the project started")
+    s.add_argument("--base", help="commit or branch to compare with (default: HEAD when the project was initialised)")
+    s.add_argument("--accept", action="store_true", help="accept the current findings as right, with --reason")
+    s.add_argument("--reason", help="why lowering the bar here is right (recorded as a decision)")
+    s.set_defaults(fn=cmd_guard)
     s = sub.add_parser("gate", help="completion gate: VERIFIED COMPLETE / PARTIALLY COMPLETE / BLOCKED")
+    s.add_argument("--recheck", action="store_true", help="run every recorded check again before judging")
+    s.add_argument("--timeout", type=int, default=600, help="seconds allowed per recheck (default 600)")
     s.add_argument("--milestone", help="judge one mini-goal (M#) instead of the whole project")
     s.set_defaults(fn=cmd_gate)
     return p
@@ -1432,12 +1636,16 @@ def main(argv=None):
     raw = list(sys.argv[1:] if argv is None else argv)
     try:
         args.fn(args, state_dir())
+        if getattr(args, "post_exit", 0):
+            return args.post_exit
     except ReadOnlyState as exc:
         if args.command in ("harvest",):
             raise OSError(str(exc)) from exc
         rec = {"at": now(), "argv": raw}
         if getattr(args, "recorded_fingerprint", None) is not None:
             rec["fingerprint"] = args.recorded_fingerprint
+        if getattr(args, "recorded", None):
+            rec["recorded"] = args.recorded
         lines = getattr(args, "batch_records", None) or [rec]
         print(
             f"READ-ONLY SHELL ({exc}): valid, but this shell cannot save it. Append exactly these {len(lines)} line(s) to "

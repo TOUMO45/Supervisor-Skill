@@ -7,13 +7,13 @@ description: Use when the user hands over a project to deliver, build, or finish
 
 ## Overview
 
-You are the accountable lead: one objective, focused specialists, shared memory, verified completion. **A report is not proof. Chat is not memory.** Plan, status and evidence live in `.supervisor/`, managed by a CLI: they survive context resets, and the gate decides "complete", not you.
+You are the accountable lead. **A report is not proof. Chat is not memory.** Plan, status and evidence live in `.supervisor/`, managed by a CLI: they survive context resets, and the gate decides "complete", not you.
 
 ```bash
 SUP="python3 <this skill's base directory>/scripts/supervisor.py"   # stdlib only; --help per command
 ```
 
-Chain updates with `&&`; `criterion add`/`verify` take several.
+Chain updates with `&&`.
 
 ## 1. Choose the mode first
 
@@ -21,22 +21,21 @@ Chain updates with `&&`; `criterion add`/`verify` take several.
 |---|---|---|
 | **Direct** | ≤3 steps, one area, no unknowns (typo, rename, one bugfix) | Do it, verify, report. No ceremony. |
 | **Lite** | One session, a handful of mostly sequential tasks | `init`, criteria, `gate`. Do the work yourself. |
-| **Full** | Several milestones, substantial independent tracks, or likely to outlive one context window | Everything below. |
+| **Full** | Several milestones or tracks, or likely to outlive one context window | Everything below. |
 
 If `.supervisor/state.json` exists, you are **resuming**: run `$SUP resume` first (§7). Asked whether work is complete: run `$SUP gate` and report its verdict; if the project predates this skill, **audit** it (§11).
 
 ## 2. Define success before planning
 
-1. Inspect what exists (repo, docs, tests, prior memory) **before** asking anything.
+1. Inspect what exists (repo, docs, tests, memory) first.
 2. Write the brief with `templates/project-brief.md`: outcome, constraints, **explicit assumptions**, and scope (in / optional / excluded).
 3. `$SUP init --objective "..."`, then `$SUP criterion add "..." "..."`. Each criterion must be checkable by a command or an observation. Criteria cover **the whole agreed project, including work deferred to a later session**: the gate judges only those.
-4. Don't ask what you can infer or decide (§9).
-5. Brief conflicts with existing code or tests: the brief wins (`$SUP decide "..." --why "..."`).
-6. A user message that adds or changes requirements is recorded **when it arrives**: a `decide --why "user clarification"` plus a criterion. A fresh session once deleted a feature requested only in chat.
+4. Don't ask what you can infer or decide (§9). Brief conflicts with existing code or tests: the brief wins (`$SUP decide "..." --why "..."`).
+5. A user message that adds or changes requirements is recorded **when it arrives**: a `decide --why "user clarification"` plus a criterion.
 
 ## 3. Plan
 
-Use `templates/roadmap.md`. Split a big project into ordered **mini-goals**, each an observable outcome with its own criteria; finish one before starting the next:
+Use `templates/roadmap.md`. Split a big project into ordered **mini-goals**: vertical slices a user could see working (not "all the database, then all the API"), each with its own criteria. Finish one before starting the next:
 
 ```bash
 $SUP milestone add "Core parses CSV" && $SUP criterion add "pipes escaped" --milestone M1
@@ -55,12 +54,12 @@ Riskiest work first; simplest design that works.
 
 ## 4. Delegate, or do it yourself
 
-Only the top-level session can delegate. A subagent costs a fresh context: delegate only when it **wins**:
+A subagent costs a fresh context, and cannot delegate further. Delegate only when it **wins**:
 - independent, substantial tracks (over ~10 tool calls each),
 - a large read where you need only the conclusion,
 - a review you want unanchored from your own reasoning.
 
-Otherwise do it yourself. Roles: `references/delegation.md`.
+Otherwise do it yourself (`references/delegation.md`).
 
 Every brief fills **all** slots of `templates/task-assignment.md`. Launch independent agents in one message. Before dispatching:
 
@@ -72,16 +71,17 @@ Exit `3` = a guard tripped: sequence the tasks or split the files (`--force` onl
 
 ## 5. Verify and integrate (a report is a claim)
 
-On a subagent's "done": `$SUP task set T2 done`, then run the check **yourself**:
+On a subagent's "done": `$SUP task set T2 done`, then check it **yourself**. Wherever a command can decide, let the tool run it: a failing check cannot be verified.
 
 ```bash
+$SUP criterion verify AC1 --run "python3 -m unittest tests.test_cli"   # the tool runs it; exit 3 if it fails
+$SUP criterion verify AC5 --evidence "README: every flag has an example"   # only what no command can check
 $SUP task set T2 verified --evidence "test_cli: 9 OK"
-$SUP criterion verify AC1 --evidence "test_pipe_escaped OK; echo 'a|b' | python3 -m csvmd -> a\|b"
 ```
 
-Evidence is specific to *that* criterion: the command plus what you observed, not a suite total.
+Evidence is specific to *that* criterion, not a suite total.
 
-`verified` fingerprints the task's owned files; `resume` and `gate` flag later edits for re-verification. Targeted checks while building; the full suite at integration points.
+`verified` fingerprints the task's files; `resume` and `gate` flag later edits. Targeted checks while building; the full suite at integration points.
 
 ## 6. Failures: bounded retries, then change strategy
 
@@ -90,11 +90,11 @@ Reproduce, find the root cause, make one focused fix, re-verify. Log each failed
 - **RETRY LIMIT** (3 per strategy): gather new evidence, then `$SUP task strategy T4 "instrument router"`.
 - **STRATEGY LIMIT** (3 per task): escalate with the evidence log.
 
-Playbook: `references/recovery.md`.
+See `references/recovery.md`.
 
 ## 7. Memory and resumption
 
-Update memory at milestones, before handoffs, and when context runs low. Keep `$SUP next "..."` current. Commit `.supervisor/`.
+Update memory at milestones and before handoffs. Keep `$SUP next "..."` current. Commit `.supervisor/`.
 
 After an interruption, run `$SUP resume` and act in its order: don't redo *verified and unchanged*; re-verify *changed*; for *in flight*, check the agent's report or files first; verify *done*; recheck *blocked*; start *ready*. Decisions are binding; reversing one takes a new `decide`.
 
@@ -125,20 +125,22 @@ Ask blocked questions once, together (`templates/escalation.md`). While `gate` o
 ```bash
 $SUP criterion drop AC7 --reason "xlsx needs a third-party package"   # descoped, listed as excluded
 $SUP next --clear   # the gate refuses while next actions remain
-$SUP gate           # 0 VERIFIED COMPLETE | 10 PARTIALLY COMPLETE | 20 BLOCKED
+$SUP gate --recheck # runs every recorded check again: 0 VERIFIED COMPLETE | 10 PARTIALLY COMPLETE | 20 BLOCKED
 ```
 
-Report the gate's verdict verbatim, assumptions included, with `templates/final-delivery.md` (`templates/verification-report.md` for consequential integrations). **Never call the work complete when the gate disagrees.**
+In git, the gate also runs `$SUP guard`: a skipped or deleted test, a removed assertion, a silenced checker or a stub in the diff blocks completion until fixed (or `guard --accept --reason`).
+
+Report the gate's verdict verbatim, assumptions included, with `templates/final-delivery.md`. **Never call the work complete when the gate disagrees.**
 
 ## 11. Audit an existing project
 
 What was *asked* lives in past conversations; the newest work may be on another branch.
 
-1. `$SUP branches --fetch` **first**: every branch against the default one. A default checkout hides branches and inflates counts. Work on an unmerged branch is **unmerged, not missing**: audit the latest branch too.
-2. `$SUP harvest` finds this project's past Claude Code sessions itself and writes every human prompt (H1…Hn) plus each session's final claim to `.supervisor/harvest.md`, secrets redacted, git-ignored. Sessions held elsewhere (cloud, other machines) are merged with `--extra`: read each one's **last page first**, since it may hold a summary listing every earlier user message. Exit `5` or a short list is **not** proof there is no history. See `references/audit.md`.
+1. `$SUP branches --fetch` **first**. A default checkout hides branches. Work on an unmerged branch is **unmerged, not missing**: audit the latest branch too.
+2. `$SUP harvest` writes every human prompt (H1…Hn) and each session's final claim from past Claude Code sessions to `.supervisor/harvest.md`. Sessions held elsewhere (cloud, other machines) are merged with `--extra`: read each one's **last page first**. Exit `5` is **not** proof there is no history. See `references/audit.md`.
 3. For each requirement: `$SUP criterion add "..." --source H#`. A later prompt that overrides an earlier one is a `decide`.
-4. Verify each criterion against the code **as it is now**; old "done" claims and passing tests are leads. If it can't be checked here (credentials, a service, paid runs): `$SUP criterion unverifiable AC# --reason "needs ..."`, never `fail` or `verify`.
-5. Run `gate`; report with `templates/audit-report.md`, including **coverage** (what was and wasn't read). Never say "100% complete" while a source is uncovered.
+4. Verify each criterion against the code **as it is now**; old "done" claims are leads. If it can't be checked here: `$SUP criterion unverifiable AC# --reason "needs ..."`, never `fail` or `verify`.
+5. Run `gate`; report with `templates/audit-report.md`, including **coverage**. Never say "100% complete" while a source is uncovered.
 
 ## Host adaptation
 
@@ -154,7 +156,7 @@ More: `references/host-adaptation.md`.
 ## Red flags: stop and correct
 
 - "Tests pass" without your own output.
-- Saying "complete" while `gate` exits non-zero.
+- Skipping a test or silencing a checker to get green.
 - A user requirement, or a question for the owner, that exists only in chat.
 - Asking the owner something reversible, or stopping while unblocked work remains.
 - An expensive or irreversible step with no dry run first.

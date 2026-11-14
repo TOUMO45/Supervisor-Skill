@@ -55,6 +55,47 @@ Anything expensive, slow or irreversible gets a **dry run** first: every step ex
 real inputs. On one real project the first dry run of a frozen experiment plan showed its very first command
 could not work as written; nobody had run it. A plan that has never executed is a hypothesis.
 
+## Let the tool hold the proof
+
+- **A check the tool ran beats a sentence you typed.** `criterion verify AC# --run "<command>"` executes the
+  command and records its exit code and output; a failing check cannot be marked verified. Keep `--evidence` for
+  what no command can decide (a document reads well, a screen looks right). The gate prints how many criteria
+  rest on each kind.
+- **Re-check before you claim.** `gate --recheck` runs every recorded check again. Work verified on Monday can be
+  broken by Tuesday's change.
+- **Never lower the bar to get green.** Faced with a red check, the cheapest moves are to skip the test, delete
+  the assertion, silence the checker, or leave a stub. `guard` finds exactly those in the diff since the project
+  started, and the gate refuses while any stand. If one is right (a test for removed behaviour), accept it with
+  its reason: `guard --accept --reason "..."`. Tightening is silent; loosening is recorded.
+- **Stop the line.** When a check goes red, stop adding features: keep the evidence, find the cause, fix it, add
+  the test that would have caught it, then resume. A bug left in slice 1 makes slices 2 to 5 wrong.
+- Not every check is equally strong. A check from outside the project (a schema validator, a scanner, a real
+  browser) cannot be satisfied by code that does not work; your own tests can. Prefer at least one outside check
+  on anything that matters.
+
+## Slice the work vertically
+
+- A mini-goal is one complete path a user could exercise, through every layer it needs. "User can register"
+  (schema, endpoint, form) is a slice; "all the database" is not, and nothing works until the last layer lands.
+- A task fits one focused session and one to five files. Split it when it needs more than three acceptance
+  bullets, spans two independent subsystems, or has "and" in its title.
+- Put a checkpoint after every two or three tasks: full suite, build, the main flow run end to end.
+- After a passing run, do not repeat the same command until the code changes. A second run adds nothing.
+
+## Keep orchestration shallow
+
+- One level only: the lead dispatches specialists; specialists never dispatch. Every extra layer paraphrases the
+  task, loses detail and roughly doubles the tokens.
+- No router whose only job is to choose who works. If a step only decides where to send the work, delete it and
+  send the work.
+- A specialist earns its dispatch by bringing something the lead lacks: a fresh, unanchored view (review), or a
+  large read whose conclusion is small. Measured on one real toolkit: its builders used 15% of the tokens, and the
+  layers coordinating them used the rest.
+
+_The slicing, bar-guard and shallow-orchestration rules follow addyosmani/agent-skills (MIT):
+planning-and-task-breakdown, incremental-implementation, constraint-driven-development and its
+orchestration-patterns reference. What is added here is enforcement by the CLI._
+
 ## Order work by risk, not by ease
 
 - Do first what could invalidate the plan: the unknown integration, the unproven assumption, the external

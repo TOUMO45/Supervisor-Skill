@@ -1373,3 +1373,160 @@ class TestRoadmapIsWhole(CliTestCase):
         run("criterion", "verify", "AC1", "--evidence", "ok")
         proc = run("gate")
         self.assertEqual(proc.returncode, 0, proc.stdout)
+
+
+class GitProjectCase(CliTestCase):
+    """A small git project: one module, two tests, one commit. The supervisor is initialised after the commit."""
+
+    CHECK = f"{sys.executable} -m unittest discover -s tests"
+
+    def setUp(self):
+        super().setUp()
+        _git(self.dir, "init", "-q")
+        (self.dir / "tests").mkdir()
+        (self.dir / "m.py").write_text("def add(a, b):\n    return a + b\n")
+        (self.dir / "tests" / "test_m.py").write_text(
+            "import unittest\nfrom m import add\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n\n"
+            "    def test_neg(self):\n        self.assertEqual(add(-1, 1), 0)\n")
+        (self.dir / ".gitignore").write_text("__pycache__/\n")
+        _git(self.dir, "add", "-A")
+        _git(self.dir, "commit", "-q", "-m", "init")
+        self.init()
+        self.run_cli("criterion", "add", "the test suite passes")
+
+    def break_code(self):
+        # a different length, so Python's bytecode cache cannot mistake the new file for the old one
+        (self.dir / "m.py").write_text("def add(a, b):\n    return a - b  # broken\n")
+
+
+class TestToolRunChecks(GitProjectCase):
+    """Evidence typed by the agent is the agent's word. A check the tool runs is not. (ECCode review, 2026-11-13:
+    a project whose tests failed was approved and delivered on a reviewer's `true`.)"""
+
+    def test_run_verifies_on_exit_0_and_records_what_the_tool_saw(self):
+        out = self.run_cli("criterion", "verify", "AC1", "--run", self.CHECK).stdout
+        self.assertIn("AC1 verified: tool ran", out)
+        crit = self.state()["criteria"]["AC1"]
+        self.assertEqual(crit["status"], "verified")
+        self.assertEqual(crit["check"], self.CHECK)
+        self.assertIn("exit 0", crit["evidence"])
+        self.assertIn("OK", crit["evidence"])
+
+    def test_failing_check_marks_the_criterion_failed_and_exits_3(self):
+        self.break_code()
+        proc = self.run_cli("criterion", "verify", "AC1", "--run", self.CHECK, expect=3)
+        self.assertIn("AC1 failed: tool ran", proc.stdout)
+        self.assertEqual(self.state()["criteria"]["AC1"]["status"], "failed")
+        self.assertIn("AC1 not verified (failed)", self.run_cli("gate", expect=10).stdout)
+
+    def test_gate_says_how_much_of_the_proof_is_the_tools_own(self):
+        self.run_cli("criterion", "add", "the README explains usage")
+        self.run_cli("criterion", "verify", "AC1", "--run", self.CHECK)
+        self.run_cli("criterion", "verify", "AC2", "--evidence", "README.md has a Usage section with one example")
+        gate = self.run_cli("gate").stdout
+        self.assertIn("Proof: 1 of 2 criteria rest on a check the tool ran itself; 1 rest on the agent's own statement (AC2)", gate)
+
+    def test_recheck_catches_work_that_broke_after_it_was_verified(self):
+        self.run_cli("criterion", "verify", "AC1", "--run", self.CHECK)
+        self.run_cli("gate")
+        self.break_code()
+        gate = self.run_cli("gate", "--recheck", expect=10).stdout
+        self.assertIn("AC1 check fails now", gate)
+        self.assertIn(f'criterion verify AC1 --run "{self.CHECK}"', gate)
+        self.assertEqual(self.state()["criteria"]["AC1"]["status"], "verified")   # the gate reports; it does not rewrite
+
+    def test_run_needs_no_typed_evidence_but_evidence_alone_still_works(self):
+        self.run_cli("criterion", "verify", "AC1", expect=2)
+        self.run_cli("criterion", "verify", "AC1", "--evidence", "ran the suite by hand: 2 OK")
+        self.assertNotIn("check", self.state()["criteria"]["AC1"])
+        self.run_cli("criterion", "fail", "AC1", "--run", self.CHECK, expect=1)
+
+    def test_a_journal_replay_uses_the_recorded_result_and_never_runs_the_check_again(self):
+        marker = self.dir / "ran.txt"
+        cmd = f"{sys.executable} -c \"open('ran.txt','a').write('x')\""
+        proc = subprocess.run([sys.executable, str(CLI), "criterion", "verify", "AC1", "--run", cmd], cwd=self.dir,
+                              capture_output=True, text=True, env={**os.environ, "SUPERVISOR_READONLY": "1"})
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+        line = proc.stderr.strip().splitlines()[-1]
+        self.assertEqual(json.loads(line)["recorded"]["ran"]["exit"], 0)
+        (self.dir / ".supervisor" / "journal.jsonl").write_text(line + "\n")
+        self.assertEqual(marker.read_text(), "x")
+        for _ in range(3):
+            self.assertIn("`verified`", self.run_cli("status").stdout)
+        self.assertEqual(marker.read_text(), "x")                 # three replays, zero extra executions
+
+
+class TestQualityBarGuard(GitProjectCase):
+    """An agent that meets a red check takes the cheapest road to green. The five moves are visible in the diff
+    (after constraint-driven-development in addyosmani/agent-skills, MIT)."""
+
+    def lower_the_bar(self):
+        test = self.dir / "tests" / "test_m.py"
+        test.write_text(test.read_text().replace(
+            "    def test_neg(self):\n        self.assertEqual(add(-1, 1), 0)\n",
+            "    @unittest.skip('later')\n    def test_neg(self):\n        pass\n"))
+        with open(self.dir / "m.py", "a") as handle:
+            handle.write("\n\ndef sub(a, b):\n    raise NotImplementedError  # type: ignore\n")
+
+    def test_clean_work_passes_and_new_tests_and_code_are_not_findings(self):
+        with open(self.dir / "m.py", "a") as handle:
+            handle.write("\n\ndef sub(a, b):\n    return a - b\n")
+        (self.dir / "tests" / "test_sub.py").write_text("import unittest\nfrom m import sub\n\n\nclass S(unittest.TestCase):\n"
+                                                        "    def test_sub(self):\n        self.assertEqual(sub(3, 1), 2)\n")
+        self.assertIn("guard: clean", self.run_cli("guard").stdout)
+
+    def test_each_bar_lowering_move_is_named_with_its_file(self):
+        self.lower_the_bar()
+        out = self.run_cli("guard", expect=3).stdout
+        for needle in ("checker silenced: m.py", "unfinished work: m.py", "test skipped: tests/test_m.py",
+                       "assertion removed: tests/test_m.py"):
+            self.assertIn(needle, out)
+
+    def test_deleting_a_test_file_is_a_finding_and_an_edited_assertion_is_not(self):
+        (self.dir / "tests" / "test_m.py").write_text(
+            "import unittest\nfrom m import add\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_add(self):\n        self.assertEqual(add(2, 2), 4)\n\n"
+            "    def test_neg(self):\n        self.assertEqual(add(-1, 1), 0)\n")
+        self.assertIn("guard: clean", self.run_cli("guard").stdout)
+        (self.dir / "tests" / "test_m.py").unlink()
+        self.assertIn("test file deleted: tests/test_m.py", self.run_cli("guard", expect=3).stdout)
+
+    def test_the_gate_refuses_while_a_finding_stands_and_passes_once_fixed(self):
+        self.run_cli("criterion", "verify", "AC1", "--run", self.CHECK)
+        self.run_cli("gate")
+        self.lower_the_bar()
+        gate = self.run_cli("gate", expect=10).stdout
+        self.assertIn("quality bar lowered - test skipped: tests/test_m.py", gate)
+        _git(self.dir, "checkout", "-q", "--", ".")
+        self.run_cli("gate")
+
+    def test_a_finding_can_be_accepted_only_with_a_reason_and_becomes_a_decision(self):
+        self.run_cli("criterion", "verify", "AC1", "--run", self.CHECK)
+        self.lower_the_bar()
+        self.run_cli("guard", "--accept", expect=2)
+        out = self.run_cli("guard", "--accept", "--reason", "sub is out of scope this milestone; test_neg is flaky on CI").stdout
+        self.assertIn("4 finding(s) accepted, recorded as D1", out)
+        self.assertIn("guard: clean", self.run_cli("guard").stdout)
+        self.run_cli("gate")
+        with open(self.dir / "m.py", "a") as handle:
+            handle.write("x = 1  # noqa\n")
+        self.assertIn("checker silenced: m.py: x = 1 # noqa", self.run_cli("guard", expect=3).stdout)   # new ones still count
+
+    def test_outside_git_the_guard_says_it_cannot_run_and_the_gate_is_not_blocked_by_it(self):
+        plain = self.dir / "plain"
+        plain.mkdir()
+        env = {**os.environ, "SUPERVISOR_DIR": str(plain / ".supervisor"), "GIT_CEILING_DIRECTORIES": str(self.dir)}
+        run = lambda *a: subprocess.run([sys.executable, str(CLI), *a], cwd=plain, capture_output=True, text=True, env=env)  # noqa: E731
+        run("init", "--objective", "no git here")
+        proc = run("guard")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("needs a base commit", proc.stderr)
+        run("criterion", "add", "works")
+        run("criterion", "verify", "AC1", "--evidence", "ran it by hand")
+        self.assertEqual(run("gate").returncode, 0)
+
+    def test_docs_and_the_supervisors_own_files_are_not_scanned(self):
+        (self.dir / "NOTES.md").write_text("TODO: write more\n# type: ignore is discussed here\n")
+        self.run_cli("log", "TODO later")
+        self.assertIn("guard: clean", self.run_cli("guard").stdout)

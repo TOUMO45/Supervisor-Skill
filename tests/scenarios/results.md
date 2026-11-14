@@ -444,3 +444,28 @@ On these single-session tasks the plain model reaches the same score for 30 to 5
 not contain a task long enough for memory to pay for itself (several sessions, a context reset, parallel agents),
 so it cannot show the benefit side of that trade; `resume-no-redo` starts from a prepared state and is one session.
 In the batch re-run two baseline runs fell short (resume 0.89, plan 0.89); with 3 runs per arm that is noise-level.
+
+## 17. v1.7: what was taken from addyosmani/agent-skills, and why
+
+That repository (25 skills, about 52,000 words, MIT) encodes senior-engineering workflow as prose skills run by
+slash commands, with the user as the orchestrator. Read against this skill and against the ECCode findings
+(sections 13-16 and ECCode's `docs/review-2026-11-13.md`):
+
+| Their idea | Status here before | Decision |
+|---|---|---|
+| "Verify, don't assume": evidence, not "seems right" | evidence was a string the agent typed | **Strengthened and enforced:** `criterion verify --run` executes the check; `gate --recheck` runs them all again; the gate prints how much proof is the tool's own |
+| Guard the bar: skipped tests, removed assertions, silenced checkers, stubs, visible in the diff | absent | **Adopted and enforced:** `guard`, run by the gate; `guard --accept --reason` records an exception as a decision |
+| Vertical slices, task sizing, checkpoints | mini-goals existed without a slicing rule | **Adopted as text:** roadmap template and `references/engineering.md` |
+| A standing Definition of Done | absent | **Adopted:** `templates/definition-of-done.md`, tied to the CLI's commands |
+| Stop-the-line on a red check | implied by the retry rules | **Adopted as text** |
+| Orchestration depth of one; no router persona; no LLM "lifecycle orchestrator" | delegation rules said top-level only | **Adopted as text**, with ECCode's measurement (builders 15% of tokens) as the reason |
+| "Surface assumptions, then wait"; "STOP on confusion and ask" | the opposite rule since v1.5 | **Not adopted.** Their user is present at every step; this skill is for work the owner has handed over. Assumptions are recorded and reported, and work waits only for the four reasons |
+| 16-step lifecycle of separate skills | one skill | **Not adopted.** Their own reference warns that chaining the steps through an agent doubles cost |
+| Spec, API design, security, performance, observability skills | out of scope | **Not adopted.** They are engineering content, not supervision; the two can be installed side by side |
+
+**Tests:** 130 unit tests (13 new: tool-run checks, journal replay that never re-executes a check, the guard's five
+moves, acceptance with a reason, behaviour outside git).
+
+**Not measured:** their skills were read, not run; their eval suite was not executed here. Whether `--run` and the
+guard change outcomes for a weak model is untested: the one way to find out is a with/without run on a task where
+the cheap road to green is tempting.
