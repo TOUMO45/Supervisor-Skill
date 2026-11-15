@@ -86,4 +86,20 @@ Each run prints one line per session and a final line. To read a session: ECCode
 
 ## Results
 
-None yet.
+Run on 2026-11-15 on the owner's Windows machine, Supervisor-Skill at `260ab3d`.
+
+| Run | After s1 | After s2 | Final | CHAT | Cost | Turns | Seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| w1 | 22/41 | 32/41 | 41/41 | 9/9 | $2.89 | 67 | 437 |
+| w2 | 22/41 | 32/41 | 41/41 | 9/9 | $2.69 | 74 | 381 |
+| w3 | 22/41 | 32/41 | 41/41 | 9/9 | $2.80 | 62 | 430 |
+
+No run contaminated, no session timed out.
+
+**Verdict by the rule fixed above: stopped.** The weak model alone kept all nine chat-only requirements in all three
+runs, so the test cannot show a tool helping. Arms k, e and s were not run.
+
+What the test did and did not exercise, noted after the fact: each chat-only requirement was built in the session
+that stated it, so it lived on in the code and its tests. A later session only had to not undo it. The test therefore
+shows that the weak model does not overwrite working behaviour to match a stale brief. It does not show whether a
+requirement stated in one session and due to be built in a later one would survive.
