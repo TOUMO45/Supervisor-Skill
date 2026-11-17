@@ -3,6 +3,7 @@
 // Three-session pilot runner (protocol: tests/e2e/sessions/README.md). One run per call.
 //   node tests/e2e/sessions/run.js --arm w|k|e|s --run <n> --out <dir outside both repositories>
 //                                  [--eccode <ECCode checkout>]  (arm e only)  [--wall-minutes <per session, default 30>]
+//                                  [--variant spread|deferred]  (default spread)
 // A run is three separate `claude -p` sessions, one after another, in the same workspace. Nothing carries from one
 // session to the next except the files in that workspace. The hidden oracle scores the workspace after each session;
 // the score after session 3 is the result.
@@ -117,7 +118,11 @@ function main() {
     const rel = path.relative(path.resolve(repo), out);
     if (!rel.startsWith('..') && !path.isAbsolute(rel)) throw new Error(`--out must be outside ${path.resolve(repo)}: the agent must not be able to find the oracle`);
   }
-  const dir = path.join(out, `sessions-${arm}-${f.run}`);
+  // --variant deferred: every chat-only requirement is said in session 1, including those for parts built later.
+  const variant = f.variant || 'spread';
+  if (!['spread', 'deferred'].includes(variant)) throw new Error('--variant spread|deferred');
+  const promptDir = variant === 'deferred' ? 'prompts-deferred' : 'prompts';
+  const dir = path.join(out, `sessions-${variant === 'deferred' ? 'deferred-' : ''}${arm}-${f.run}`);
   if (fs.existsSync(dir)) throw new Error(`${dir} exists: a run is done once`);
   const ws = path.join(dir, 'workspace');
   fs.mkdirSync(ws, { recursive: true });
@@ -138,7 +143,7 @@ function main() {
   const wallMs = (f['wall-minutes'] ? Number(f['wall-minutes']) : 30) * 60 * 1000;
   const results = [];
   for (const name of SESSIONS) {
-    const ask = fs.readFileSync(path.join(HERE, 'prompts', `${name}.md`), 'utf8').trim();
+    const ask = fs.readFileSync(path.join(HERE, promptDir, `${name}.md`), 'utf8').trim();
     const r = session(name, arm, MODELS[arm], wrap(ask), extra, ws, path.join(dir, name), wallMs);
     results.push(r);
     const c = r.chat ? `${r.chat.passed}/${r.chat.total}` : 'n/a';
@@ -149,7 +154,7 @@ function main() {
   const sum = (k) => results.reduce((a, r) => a + (r[k] || 0), 0);
   const priced = results.every((r) => r.costUsd !== null);
   const final = {
-    project: 'sessions', arm, run: Number(f.run), model: MODELS[arm],
+    project: 'sessions', variant, arm, run: Number(f.run), model: MODELS[arm],
     oracle: end.oracle, chat: end.chat, byOrigin: { brief: end.brief, s1: end.s1, s2: end.s2, s3: end.s3 }, failed: end.failed,
     costUsd: priced ? sum('costUsd') : null, wallSeconds: sum('wallSeconds'), turns: sum('turns'),
     anyTimedOut: results.some((r) => r.timedOut), contaminated: results.some((r) => r.contaminated),
@@ -159,7 +164,7 @@ function main() {
   fs.writeFileSync(path.join(dir, 'result.json'), `${JSON.stringify(final, null, 2)}\n`);
   const o = (x) => (x ? `${x.passed}/${x.total}` : 'n/a');
   const used = arm === 'k' ? `  skill:${final.usedSkill.map((u) => (u ? 'y' : 'n')).join('')}` : arm === 'e' ? `  eccode:${final.usedEccode.map((u) => (u ? 'y' : 'n')).join('')}` : '';
-  process.stdout.write(`sessions ${arm}${f.run}: Q ${o(final.oracle)}  CHAT ${o(final.chat)}  (s1 ${o(end.s1)} s2 ${o(end.s2)} s3 ${o(end.s3)} brief ${o(end.brief)})  cost ${priced ? final.costUsd.toFixed(2) : 'n/a'}  ${final.turns} turns  ${final.wallSeconds}s${used}  contaminated:${final.contaminated}\n`);
+  process.stdout.write(`sessions${variant === 'deferred' ? '-deferred' : ''} ${arm}${f.run}: Q ${o(final.oracle)}  CHAT ${o(final.chat)}  (s1 ${o(end.s1)} s2 ${o(end.s2)} s3 ${o(end.s3)} brief ${o(end.brief)})  cost ${priced ? final.costUsd.toFixed(2) : 'n/a'}  ${final.turns} turns  ${final.wallSeconds}s${used}  contaminated:${final.contaminated}\n`);
 }
 
 try { main(); } catch (e) { process.stderr.write(`${e.message}\n`); process.exitCode = 1; }

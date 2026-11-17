@@ -103,3 +103,25 @@ What the test did and did not exercise, noted after the fact: each chat-only req
 that stated it, so it lived on in the code and its tests. A later session only had to not undo it. The test therefore
 shows that the weak model does not overwrite working behaviour to match a stale brief. It does not show whether a
 requirement stated in one session and due to be built in a later one would survive.
+
+## Variant "deferred" (W3b), registered 2026-11-17 before any run of it
+
+The first version could not show a loss, for the reason noted above: every requirement was built in the session that
+stated it. This variant removes that. Session 1 states all nine chat-only requirements, including the three that
+belong to parts built in sessions 2 and 3 (14-day loans, the 3-book limit, `--min-days`), and says they will not be
+repeated. The prompts of sessions 2 and 3 (`prompts-deferred/`) do not mention them. A later session can only honour
+them if an earlier session left them somewhere in the folder.
+
+Same brief, oracle, arms, limits and rules as above, with one change of emphasis: the six checks tagged "said in
+session 2" and "said in session 3" are now the deferred ones, and they are reported next to CHAT.
+
+Order: arm w three times first. If all three score CHAT 9/9, the variant stops like the first. Otherwise arms k and e
+run as described above (one traced run each, then up to three), and s once.
+
+```
+node tests/e2e/sessions/run.js --variant deferred --arm w --run 1 --out <dir>
+```
+
+### Results (deferred)
+
+None yet.
