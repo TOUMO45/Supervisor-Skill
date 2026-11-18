@@ -124,4 +124,19 @@ node tests/e2e/sessions/run.js --variant deferred --arm w --run 1 --out <dir>
 
 ### Results (deferred)
 
-None yet.
+Run on 2026-11-18 on the owner's Windows machine, Supervisor-Skill at `d7ae453`.
+
+| Run | After s1 | After s2 | Final | CHAT | Turns | Seconds |
+| --- | --- | --- | --- | --- | --- | --- |
+| w1 | 21/41 | 32/41 | 40/41 | 9/9 | 103 | 403 |
+| w2 | 22/41 | 32/41 | 41/41 | 9/9 | 82 | 488 |
+| w3 | 22/41 | 32/41 | 41/41 | 9/9 | 113 | 518 |
+
+No run contaminated. Reported cost was $0.10 per run, far below the first variant ($2.69 to $2.89) for similar
+work; not explained, so cost is not used.
+
+**Verdict by the rule: stopped.** The weak model alone honoured all nine chat-only requirements in all three runs,
+including the six it was told about one or two sessions before it had to build them. After session 2 the 14-day and
+3-book rules were already in place although the session 2 prompt did not mention them, so session 1 must have left
+them in the folder. How (which file) has not been looked at yet. Arms k, e and s were not run. This trap does not
+catch the model.
