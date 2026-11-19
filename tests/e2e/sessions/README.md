@@ -185,3 +185,18 @@ time. One loss in three is a weak signal, not a rate.
 
 By the rule the test continues: arms k and e, memory off. To count as helping, an arm needs mean CHAT of at least
 9.0 (all three runs perfect) and no run below 3.
+
+First traced run of each tool, 2026-11-19, memory off, `harness-memory-files` 0 in both:
+
+| Run | After s1 | After s2 | Final | CHAT | Tool used (s1 s2 s3) | Turns | Seconds | Reported cost |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| k1 | 22/41 | 32/41 | 41/41 | 9/9 | yes yes yes | 99 | 706 | $0.12 |
+| e1 | 23/41 | 33/41 | 41/41 | 9/9 | yes yes yes | 79 | 938 | $1.28 |
+
+Both tools were used in every session and both kept all nine. Arm e's session 2 reports 1 turn of the main agent
+for 177 s of work; the work was done by subagents, which the turn count does not include.
+
+**Addition, registered before any further run:** with arm w losing in one run of three, three runs per arm cannot
+tell the arms apart (a tool that does nothing would still score three perfect runs about a third of the time). Arm w
+therefore gets three more runs (w4 to w6), and arms k and e get runs 2 and 3 as planned. The verdict rule above is
+applied to all runs of each arm. Reported costs are still unexplained and are not used for the verdict.
