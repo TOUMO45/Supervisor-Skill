@@ -321,7 +321,8 @@ def render(state):
     out += ["", "## Next actions"]
     out += [f"{i}. {a}" for i, a in enumerate(state["next"], 1)] or ["- _none_"]
     out += ["", "## Log"]
-    out += [f"- {e['at']} {e['text']}" for e in state["log"][-(20 if full else 8):]] or ["- _empty_"]
+    clip = (lambda t: t) if full else (lambda t: t if len(t) <= 90 else t[:87] + "...")
+    out += [f"- {e['at']} {clip(e['text'])}" for e in state["log"][-(20 if full else 8):]] or ["- _empty_"]
     return "\n".join(out) + "\n"
 
 

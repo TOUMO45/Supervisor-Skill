@@ -288,9 +288,10 @@ class TestDurability(CliTestCase):
     def test_memory_keeps_finished_items_short_and_status_full_shows_evidence(self):
         # MEMORY.md is read every session and stays in context: verified items are one short line.
         self.init()
-        self.run_cli("criterion", "add", "Lists books", "book list")
-        self.run_cli("criterion", "add", "Adds members", "member add")
-        self.run_cli("criterion", "verify", "AC1", "--evidence", "test_books: 14 OK, long evidence text here")
+        self.run_cli("criterion", "add", "Lists books")
+        self.run_cli("criterion", "add", "Adds members")
+        evidence = "test_books: 14 OK; " + "the listing matched the expected table, " * 4 + "long evidence text here"
+        self.run_cli("criterion", "verify", "AC1", "--evidence", evidence)
         memory = (self.dir / ".supervisor" / "MEMORY.md").read_text()
         self.assertIn("**AC1** Lists books - `verified`", memory)
         self.assertNotIn("long evidence text here", memory)
