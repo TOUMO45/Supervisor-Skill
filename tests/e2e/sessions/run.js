@@ -34,15 +34,18 @@ function flags(argv) {
 }
 
 function supervisorPlugin(dest) {
-  // Only the plugin itself: the tests (and this benchmark's oracle) stay out of the agent's reach.
-  if (!fs.existsSync(path.join(dest, 'skills'))) {
-    fs.mkdirSync(dest, { recursive: true });
-    for (const part of ['.claude-plugin', 'skills']) fs.cpSync(path.join(SKILL_REPO, part), path.join(dest, part), { recursive: true });
-  }
+  // Only the plugin itself: the tests (and this benchmark's oracle) stay out of the agent's reach. Copied fresh for
+  // every run, so a run always gets the skill as it is in this checkout now.
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(dest, { recursive: true });
+  for (const part of ['.claude-plugin', 'skills']) fs.cpSync(path.join(SKILL_REPO, part), path.join(dest, part), { recursive: true });
   return dest;
 }
 
-function eccodePlugin(repo, dest) {
+function eccodePlugin(repo, base) {
+  // One export per ECCode commit: an export left from an older commit must never be reused.
+  const head = execFileSync('git', ['-C', repo, 'rev-parse', '--short=10', 'HEAD'], { encoding: 'utf8' }).trim();
+  const dest = `${base}-${head}`;
   if (!fs.existsSync(path.join(dest, 'bin', 'eccode.js'))) {
     fs.mkdirSync(dest, { recursive: true });
     const tar = execFileSync('git', ['-C', repo, 'archive', 'HEAD'], { maxBuffer: 1 << 30 });
@@ -141,15 +144,18 @@ function main() {
   fs.mkdirSync(ws, { recursive: true });
   fs.copyFileSync(path.join(HERE, 'brief.md'), path.join(ws, 'brief.md'));
   const extra = [];
+  let toolVersion = null;
   let wrap = (ask) => ask;
   if (arm === 'k') {
     extra.push('--plugin-dir', supervisorPlugin(path.join(out, 'supervisor-plugin')));
+    try { toolVersion = `skill ${execFileSync('git', ['-C', SKILL_REPO, 'rev-parse', '--short=10', 'HEAD'], { encoding: 'utf8' }).trim()}`; } catch { toolVersion = 'skill (no git)'; }
     wrap = (ask) => K_PREFIX + ask;
   }
   if (arm === 'e') {
     if (!f.eccode) throw new Error('arm e needs --eccode <ECCode checkout>');
     const repo = path.resolve(f.eccode);
     const pluginDir = eccodePlugin(repo, path.join(out, 'eccode-plugin'));
+    toolVersion = `eccode ${path.basename(pluginDir).replace('eccode-plugin-', '')}`;
     extra.push('--plugin-dir', pluginDir);
     wrap = (ask) => eccodePrompt(repo, pluginDir, ask);
   }
@@ -167,7 +173,7 @@ function main() {
   const sum = (k) => results.reduce((a, r) => a + (r[k] || 0), 0);
   const priced = results.every((r) => r.costUsd !== null);
   const final = {
-    project: 'sessions', variant, harnessMemory: memoryOff ? 'off' : 'on', harnessMemoryFiles: end.harnessMemoryFiles, arm, run: Number(f.run), model: MODELS[arm],
+    project: 'sessions', toolVersion, variant, harnessMemory: memoryOff ? 'off' : 'on', harnessMemoryFiles: end.harnessMemoryFiles, arm, run: Number(f.run), model: MODELS[arm],
     oracle: end.oracle, chat: end.chat, byOrigin: { brief: end.brief, s1: end.s1, s2: end.s2, s3: end.s3 }, failed: end.failed,
     costUsd: priced ? sum('costUsd') : null, wallSeconds: sum('wallSeconds'), turns: sum('turns'),
     anyTimedOut: results.some((r) => r.timedOut), contaminated: results.some((r) => r.contaminated),
@@ -177,7 +183,7 @@ function main() {
   fs.writeFileSync(path.join(dir, 'result.json'), `${JSON.stringify(final, null, 2)}\n`);
   const o = (x) => (x ? `${x.passed}/${x.total}` : 'n/a');
   const used = arm === 'k' ? `  skill:${final.usedSkill.map((u) => (u ? 'y' : 'n')).join('')}` : arm === 'e' ? `  eccode:${final.usedEccode.map((u) => (u ? 'y' : 'n')).join('')}` : '';
-  process.stdout.write(`sessions${tag ? `-${tag.slice(0, -1)}` : ''} ${arm}${f.run}: Q ${o(final.oracle)}  CHAT ${o(final.chat)}  (s1 ${o(end.s1)} s2 ${o(end.s2)} s3 ${o(end.s3)} brief ${o(end.brief)})  cost ${priced ? final.costUsd.toFixed(2) : 'n/a'}  ${final.turns} turns  ${final.wallSeconds}s${used}  contaminated:${final.contaminated}  harness-memory-files:${end.harnessMemoryFiles.length}\n`);
+  process.stdout.write(`sessions${tag ? `-${tag.slice(0, -1)}` : ''} ${arm}${f.run}: Q ${o(final.oracle)}  CHAT ${o(final.chat)}  (s1 ${o(end.s1)} s2 ${o(end.s2)} s3 ${o(end.s3)} brief ${o(end.brief)})  cost ${priced ? final.costUsd.toFixed(2) : 'n/a'}  ${final.turns} turns  ${final.wallSeconds}s${used}  ${toolVersion ? `  ${toolVersion}` : ''}  contaminated:${final.contaminated}  harness-memory-files:${end.harnessMemoryFiles.length}\n`);
 }
 
 try { main(); } catch (e) { process.stderr.write(`${e.message}\n`); process.exitCode = 1; }
