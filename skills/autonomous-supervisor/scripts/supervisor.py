@@ -295,8 +295,13 @@ def render(state):
         "",
         "## Acceptance criteria",
     ]
+    # This page is read at the start of every session and stays in the context: keep finished items to one short
+    # line (a pilot's page reached 18k characters, mostly evidence repeated for verified criteria). Evidence stays in
+    # state.json; `status --full` prints it.
+    full = state.get("_full_memory")
     for cid, c in state["criteria"].items():
-        ev = f" - evidence: {c['evidence']}" if c.get("evidence") else ""
+        done = c["status"] == "verified" and not full
+        ev = f" - evidence: {c['evidence']}" if c.get("evidence") and not done else ""
         ev += f" - reason: {c['reason']}" if c.get("reason") else ""
         src = f" [{c['source']}]" if c.get("source") else ""
         out.append(f"- **{cid}**{src} {c['text']} - `{c['status']}`{ev}")
@@ -307,7 +312,8 @@ def render(state):
     if open_questions(state):
         out += ["", "## Waiting on the owner", *[_question_line(q, x) for q, x in open_questions(state).items()]]
     out += ["", "## Tasks"]
-    out += [_task_line(t, task) for t, task in state["tasks"].items()] or ["- _none yet_"]
+    out += [(f"- **{t}** {task['title']} - `verified`" if task["status"] == "verified" and not full else _task_line(t, task))
+            for t, task in state["tasks"].items()] or ["- _none yet_"]
     out += ["", "## Decisions"]
     out += [f"- **{d}** {x['text']} - why: {x['why']}" for d, x in state["decisions"].items()] or ["- _none_"]
     out += ["", "## Risks"]
@@ -315,7 +321,7 @@ def render(state):
     out += ["", "## Next actions"]
     out += [f"{i}. {a}" for i, a in enumerate(state["next"], 1)] or ["- _none_"]
     out += ["", "## Log"]
-    out += [f"- {e['at']} {e['text']}" for e in state["log"][-20:]] or ["- _empty_"]
+    out += [f"- {e['at']} {e['text']}" for e in state["log"][-(20 if full else 8):]] or ["- _empty_"]
     return "\n".join(out) + "\n"
 
 
@@ -899,7 +905,10 @@ def cmd_log(args, directory):
 
 
 def cmd_status(args, directory):
-    print(render(load(directory)), end="")
+    state = load(directory)
+    if getattr(args, "full", False):
+        state = {**state, "_full_memory": True}
+    print(render(state), end="")
 
 
 def ready_tasks(state):
@@ -1609,8 +1618,10 @@ def build_parser():
     s.add_argument("--fetch", action="store_true", help="fetch all remote branches first (updates remote-tracking refs only)")
     s.add_argument("--remote", action="store_true", help="also list branches the remote has that are not fetched")
     s.set_defaults(fn=cmd_branches)
+    s = sub.add_parser("status", help="print MEMORY.md (--full: with the evidence of finished items)")
+    s.add_argument("--full", action="store_true")
+    s.set_defaults(fn=cmd_status)
     for name, fn, text in (
-        ("status", cmd_status, "print MEMORY.md"),
         ("resume", cmd_resume, "print a resume brief after an interruption"),
         ("ready", cmd_ready, "list pending tasks whose dependencies are verified"),
     ):
