@@ -140,3 +140,33 @@ including the six it was told about one or two sessions before it had to build t
 3-book rules were already in place although the session 2 prompt did not mention them, so session 1 must have left
 them in the folder. How (which file) has not been looked at yet. Arms k, e and s were not run. This trap does not
 catch the model.
+
+## Correction (2026-11-19): the sessions were not memoryless
+
+Checked on run deferred-w-1: nothing in the project folder carried the deferred decisions after session 1 (no notes
+file; the README mentions them only once they were built). Claude Code's own per-project memory did:
+`~/.claude/projects/<workspace>/memory/` held `MEMORY.md` and `shelfmark_decisions.md`. `--setting-sources ""` does
+not turn that feature off.
+
+So both results above stand as measured, but they answer a narrower question than the one asked: **the weak model
+inside Claude Code, with Claude Code's built-in memory, loses nothing across sessions.** The statement at the top that
+"the only thing that carries over is what is in the folder" was wrong. Whether the first variant's runs also used the
+harness memory was not checked.
+
+## Variant "deferred, memory off" (W3c), registered 2026-11-19 before any run of it
+
+The deferred variant again, with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` set for every session (`--memory off`), so that
+only the folder carries over. This stands for an agent in a harness that has no memory of its own. Every result line
+now reports `harness-memory-files`; a memory-off run that reports more than 0 is void (the switch did not work).
+
+Same oracle, arms, limits and rules. Arm w three times first; if all three score CHAT 9/9 it stops. Otherwise arm k
+(the supervisor skill, which keeps its own memory in the folder) and arm e run as described above, also with memory
+off.
+
+```
+node tests/e2e/sessions/run.js --variant deferred --memory off --arm w --run 1 --out <dir>
+```
+
+### Results (deferred, memory off)
+
+None yet.

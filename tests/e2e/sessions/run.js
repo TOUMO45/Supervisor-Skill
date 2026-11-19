@@ -3,7 +3,7 @@
 // Three-session pilot runner (protocol: tests/e2e/sessions/README.md). One run per call.
 //   node tests/e2e/sessions/run.js --arm w|k|e|s --run <n> --out <dir outside both repositories>
 //                                  [--eccode <ECCode checkout>]  (arm e only)  [--wall-minutes <per session, default 30>]
-//                                  [--variant spread|deferred]  (default spread)
+//                                  [--variant spread|deferred]  (default spread)   [--memory on|off]  (default on)
 // A run is three separate `claude -p` sessions, one after another, in the same workspace. Nothing carries from one
 // session to the next except the files in that workspace. The hidden oracle scores the workspace after each session;
 // the score after session 3 is the result.
@@ -12,6 +12,7 @@
 // Writes <out>/sessions-<arm>-<n>/{workspace/, s1/, s2/, s3/, result.json}; each sN/ holds transcript.jsonl and
 // result.json in the shape ECCode's tools/pilot-trace.js reads.
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync, execFileSync } = require('child_process');
 
@@ -69,13 +70,19 @@ function score(ws) {
   };
 }
 
-function session(name, arm, model, prompt, extraArgs, ws, dir, wallMs) {
+/** Claude Code's own per-project memory files for this workspace (kept under the user profile, outside the folder). */
+function harnessMemory(ws) {
+  const dir = path.join(os.homedir(), '.claude', 'projects', path.resolve(ws).replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
+  try { return fs.readdirSync(dir).filter((n) => n.endsWith('.md')); } catch { return []; }
+}
+
+function session(name, arm, model, prompt, extraArgs, ws, dir, wallMs, env) {
   const args = ['-p', '--model', model, '--setting-sources', '', '--strict-mcp-config', '--allowedTools', ...TOOLS,
     '--max-turns', '200', '--output-format', 'stream-json', '--verbose', ...extraArgs];
   const started = Date.now();
   const r = WIN
-    ? spawnSync(['claude', ...args.map(quote)].join(' '), { cwd: ws, input: prompt, encoding: 'utf8', timeout: wallMs, maxBuffer: 1 << 30, shell: true })
-    : spawnSync('claude', args, { cwd: ws, input: prompt, encoding: 'utf8', timeout: wallMs, maxBuffer: 1 << 30 });
+    ? spawnSync(['claude', ...args.map(quote)].join(' '), { cwd: ws, input: prompt, encoding: 'utf8', timeout: wallMs, maxBuffer: 1 << 30, shell: true, env })
+    : spawnSync('claude', args, { cwd: ws, input: prompt, encoding: 'utf8', timeout: wallMs, maxBuffer: 1 << 30, env });
   if (r.error && r.error.code !== 'ETIMEDOUT') throw new Error(`could not start claude: ${r.error.message}`);
   const wall = Math.round((Date.now() - started) / 1000);
   const text = r.stdout || '';
@@ -102,6 +109,7 @@ function session(name, arm, model, prompt, extraArgs, ws, dir, wallMs) {
     turns: last ? last.num_turns : null, assistantMessages, costUsd: last ? last.total_cost_usd : null, stopReason: last ? last.subtype : null,
     toolCalls, usedSkill: arm === 'k' ? usedSkill : null, usedEccode: arm === 'e' ? usedEccode : null,
     contaminated: /hidden_acceptance|tests[\\/]+e2e/.test(text),
+    harnessMemoryFiles: harnessMemory(ws),
     ...score(ws),
     finalMessage: last && typeof last.result === 'string' ? last.result.slice(0, 1500) : null,
   };
@@ -122,7 +130,12 @@ function main() {
   const variant = f.variant || 'spread';
   if (!['spread', 'deferred'].includes(variant)) throw new Error('--variant spread|deferred');
   const promptDir = variant === 'deferred' ? 'prompts-deferred' : 'prompts';
-  const dir = path.join(out, `sessions-${variant === 'deferred' ? 'deferred-' : ''}${arm}-${f.run}`);
+  // --memory off: Claude Code's own cross-session memory is disabled, so only the folder carries over.
+  const memoryOff = f.memory === 'off';
+  if (f.memory && !['on', 'off'].includes(f.memory)) throw new Error('--memory on|off');
+  const env = memoryOff ? { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : process.env;
+  const tag = `${variant === 'deferred' ? 'deferred-' : ''}${memoryOff ? 'nomem-' : ''}`;
+  const dir = path.join(out, `sessions-${tag}${arm}-${f.run}`);
   if (fs.existsSync(dir)) throw new Error(`${dir} exists: a run is done once`);
   const ws = path.join(dir, 'workspace');
   fs.mkdirSync(ws, { recursive: true });
@@ -144,7 +157,7 @@ function main() {
   const results = [];
   for (const name of SESSIONS) {
     const ask = fs.readFileSync(path.join(HERE, promptDir, `${name}.md`), 'utf8').trim();
-    const r = session(name, arm, MODELS[arm], wrap(ask), extra, ws, path.join(dir, name), wallMs);
+    const r = session(name, arm, MODELS[arm], wrap(ask), extra, ws, path.join(dir, name), wallMs, env);
     results.push(r);
     const c = r.chat ? `${r.chat.passed}/${r.chat.total}` : 'n/a';
     const q = r.oracle ? `${r.oracle.passed}/${r.oracle.total}` : 'n/a';
@@ -154,7 +167,7 @@ function main() {
   const sum = (k) => results.reduce((a, r) => a + (r[k] || 0), 0);
   const priced = results.every((r) => r.costUsd !== null);
   const final = {
-    project: 'sessions', variant, arm, run: Number(f.run), model: MODELS[arm],
+    project: 'sessions', variant, harnessMemory: memoryOff ? 'off' : 'on', harnessMemoryFiles: end.harnessMemoryFiles, arm, run: Number(f.run), model: MODELS[arm],
     oracle: end.oracle, chat: end.chat, byOrigin: { brief: end.brief, s1: end.s1, s2: end.s2, s3: end.s3 }, failed: end.failed,
     costUsd: priced ? sum('costUsd') : null, wallSeconds: sum('wallSeconds'), turns: sum('turns'),
     anyTimedOut: results.some((r) => r.timedOut), contaminated: results.some((r) => r.contaminated),
@@ -164,7 +177,7 @@ function main() {
   fs.writeFileSync(path.join(dir, 'result.json'), `${JSON.stringify(final, null, 2)}\n`);
   const o = (x) => (x ? `${x.passed}/${x.total}` : 'n/a');
   const used = arm === 'k' ? `  skill:${final.usedSkill.map((u) => (u ? 'y' : 'n')).join('')}` : arm === 'e' ? `  eccode:${final.usedEccode.map((u) => (u ? 'y' : 'n')).join('')}` : '';
-  process.stdout.write(`sessions${variant === 'deferred' ? '-deferred' : ''} ${arm}${f.run}: Q ${o(final.oracle)}  CHAT ${o(final.chat)}  (s1 ${o(end.s1)} s2 ${o(end.s2)} s3 ${o(end.s3)} brief ${o(end.brief)})  cost ${priced ? final.costUsd.toFixed(2) : 'n/a'}  ${final.turns} turns  ${final.wallSeconds}s${used}  contaminated:${final.contaminated}\n`);
+  process.stdout.write(`sessions${tag ? `-${tag.slice(0, -1)}` : ''} ${arm}${f.run}: Q ${o(final.oracle)}  CHAT ${o(final.chat)}  (s1 ${o(end.s1)} s2 ${o(end.s2)} s3 ${o(end.s3)} brief ${o(end.brief)})  cost ${priced ? final.costUsd.toFixed(2) : 'n/a'}  ${final.turns} turns  ${final.wallSeconds}s${used}  contaminated:${final.contaminated}  harness-memory-files:${end.harnessMemoryFiles.length}\n`);
 }
 
 try { main(); } catch (e) { process.stderr.write(`${e.message}\n`); process.exitCode = 1; }
