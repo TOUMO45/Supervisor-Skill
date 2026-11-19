@@ -169,4 +169,19 @@ node tests/e2e/sessions/run.js --variant deferred --memory off --arm w --run 1 -
 
 ### Results (deferred, memory off)
 
-None yet.
+Run on 2026-11-19 on the owner's Windows machine, Supervisor-Skill at `5562e3b`. `harness-memory-files` was 0 in
+every run, so the switch worked.
+
+| Run | After s1 | After s2 | Final | CHAT | Deferred (6) | Turns | Seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| w1 | 23/41 | 30/41 | 35/41 | 3/9 | 0/6 | 76 | 361 |
+| w2 | 22/41 | 32/41 | 41/41 | 9/9 | 6/6 | 75 | 512 |
+| w3 | 22/41 | 32/41 | 41/41 | 9/9 | 6/6 | 71 | 328 |
+
+Arm w: mean CHAT 7.0, worst 3. In one run of three the weak model lost every deferred requirement and built the
+later parts to the brief; in the other two it kept them all with nothing but the folder, so it must have written
+them down itself. This is the first test in the series where the weak model alone did not score full marks every
+time. One loss in three is a weak signal, not a rate.
+
+By the rule the test continues: arms k and e, memory off. To count as helping, an arm needs mean CHAT of at least
+9.0 (all three runs perfect) and no run below 3.
